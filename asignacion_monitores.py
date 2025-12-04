@@ -1,75 +1,55 @@
+import sys
 import pandas as pd
 import re
-from datetime import datetime
+from PySide6.QtWidgets import (
+    QApplication, QWidget, QPushButton, QVBoxLayout, 
+    QHBoxLayout, QTableView, QFileDialog, QLabel, QMessageBox,
+    QProgressBar, QTextEdit
+)
+from PySide6.QtCore import Qt, QAbstractTableModel, QThread, Signal
+from PySide6.QtGui import QFont
 
-"""
-SISTEMA DE ASIGNACIÓN DE MONITORES
-Asigna automáticamente monitores a horarios de salas según disponibilidad
-"""
 
 # ========================================================
-# CONFIGURACIÓN - AJUSTA ESTOS VALORES
+# CONFIGURACIÓN
 # ========================================================
-
 CONFIG = {
     "monitores": {
-        "archivo": "DISPONIBILIDAD HORARIA MONITORES DE SALAS 2025-II.xlsx",
-        "hoja": "Hoja 1",
-        "header_row": 4,        # Fila donde están los encabezados
-        "data_start_row": 5,    # Fila donde empiezan los datos
-        
-        # Nombres de columnas (ajustar si son diferentes)
+        "header_row": 4,
+        "data_start_row": 5,
         "col_nombre": "Nombre completo",
-        "col_min": None,        # Ej: "MIN" si existe la columna
-        "col_max": None,        # Ej: "MAX" si existe la columna
-        
-        # Valores por defecto para MIN y MAX
+        "col_min": None,
+        "col_max": None,
         "horas_min_default": 8,
         "horas_max_default": 20
     },
-    
     "espacios": {
-        # Tu Excel que YA tiene formato lista
-        "archivo": "Horario_Salas.xlsx",
-        "hoja": 0,  # Primera hoja (o nombre de la hoja)
-        
-        # Nombres de columnas en tu Excel (ajustar si son diferentes)
         "col_sala": "SALA",
         "col_dia": "DIA",
         "col_hora_inicio": "HORA_INICIO",
         "col_hora_fin": "HORA_FIN",
         "col_curso": "CURSO"
     },
-    
     "asignacion": {
-        # Estrategias de asignación
-        "balancear_carga": True,        # Distribuir equitativamente entre monitores
-        "priorizar_minimo": True,       # Intentar que todos alcancen el mínimo primero
-        
-        # Restricciones adicionales
-        "max_horas_seguidas": 4,        # Máximo de horas continuas (0 = sin límite)
-        "descanso_minimo": 1,           # Horas de descanso entre turnos
-        "permitir_sobrepasar_max": False  # Si True, puede asignar aunque exceda el máximo
-    },
-    
-    "salida": {
-        "archivo": "Asignacion_Monitores_Final.xlsx"
+        "balancear_carga": True,
+        "priorizar_minimo": True,
+        "max_horas_seguidas": 4,
+        "descanso_minimo": 1,
+        "permitir_sobrepasar_max": False
     }
 }
 
 
 # ========================================================
-# FUNCIONES DE PARSEO
+# FUNCIONES DE LÓGICA DE ASIGNACIÓN
 # ========================================================
 
 def parse_time_str(time_str):
-    """Convierte '7:00am' -> 7, '2:00pm' -> 14, '7' -> 7"""
+    """Convierte '7:00am' -> 7, '2:00pm' -> 14"""
     if pd.isna(time_str):
         return None
     
     s = str(time_str).strip().lower()
-    
-    # Formato AM/PM
     match = re.search(r'(\d{1,2})(?::(\d{2}))?\s*(am|pm)', s)
     if match:
         hour = int(match.group(1))
@@ -82,7 +62,6 @@ def parse_time_str(time_str):
         
         return hour
     
-    # Solo número
     match = re.search(r'\d+', s)
     if match:
         return int(match.group(0))
@@ -97,14 +76,12 @@ def parse_range_cell(cell_value):
     
     s = str(cell_value).strip().lower()
     
-    # Casos especiales
     if s in ["libre", "disponible", "todo el día", "todo el dia"]:
         return [(7, 22)]
     
     if s in ["no disponible", "no", "n/a", "", "nan"]:
         return []
     
-    # Buscar rangos
     ranges = []
     pattern = r'(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s*-\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)'
     
@@ -142,50 +119,35 @@ def normalizar_dia(dia):
         if d.startswith(abrev):
             return completo
     
+    if d in mapeo.values():
+        return d
+    
     return d if len(d) >= 3 else None
 
 
-# ========================================================
-# CARGA DE MONITORES
-# ========================================================
-
-def cargar_monitores():
-    """Carga la disponibilidad de los monitores"""
+def cargar_monitores_desde_excel(ruta):
+    """Carga monitores desde Excel"""
     cfg = CONFIG["monitores"]
     
-    print(f"\n📂 Cargando monitores: {cfg['archivo']}")
+    df_raw = pd.read_excel(ruta, sheet_name=0, header=None)
     
-    # Leer archivo completo
-    df_raw = pd.read_excel(cfg["archivo"], sheet_name=cfg["hoja"], header=None)
-    
-    # Extraer estructura de días y jornadas
     dias_row = df_raw.iloc[3]
     jornadas_row = df_raw.iloc[cfg["header_row"]]
     
-    # Mapear columnas
     col_mapping = {}
     current_dia = None
     col_nombre_idx = None
-    col_min_idx = None
-    col_max_idx = None
     
     for idx, val in enumerate(jornadas_row):
         val_str = str(val).strip()
         
-        # Columnas especiales
         if val_str == cfg["col_nombre"]:
             col_nombre_idx = idx
-        elif cfg["col_min"] and val_str == cfg["col_min"]:
-            col_min_idx = idx
-        elif cfg["col_max"] and val_str == cfg["col_max"]:
-            col_max_idx = idx
         
-        # Días
         dia_val = dias_row[idx] if idx < len(dias_row) else None
         if pd.notna(dia_val) and str(dia_val).strip():
             current_dia = normalizar_dia(dia_val)
         
-        # Jornadas
         val_lower = val_str.lower()
         if val_lower in ['mañana', 'manana', 'tarde', 'noche']:
             if current_dia:
@@ -193,12 +155,8 @@ def cargar_monitores():
                 col_mapping[key] = idx
     
     if col_nombre_idx is None:
-        print(f"❌ Error: No se encuentra la columna '{cfg['col_nombre']}'")
-        return []
+        raise ValueError(f"No se encuentra la columna '{cfg['col_nombre']}'")
     
-    print(f"✓ Estructura: {len(col_mapping)} bloques día/jornada")
-    
-    # Leer monitores
     monitores = []
     
     for row_idx in range(cfg["data_start_row"], len(df_raw)):
@@ -208,33 +166,16 @@ def cargar_monitores():
         if pd.isna(nombre) or str(nombre).strip() == "":
             continue
         
-        # MIN y MAX
-        horas_min = cfg["horas_min_default"]
-        horas_max = cfg["horas_max_default"]
-        
-        if col_min_idx is not None:
-            try:
-                horas_min = int(row[col_min_idx]) if pd.notna(row[col_min_idx]) else horas_min
-            except:
-                pass
-        
-        if col_max_idx is not None:
-            try:
-                horas_max = int(row[col_max_idx]) if pd.notna(row[col_max_idx]) else horas_max
-            except:
-                pass
-        
         mon = {
             "id": row_idx - cfg["data_start_row"],
             "nombre": str(nombre).strip(),
-            "min": horas_min,
-            "max": horas_max,
+            "min": cfg["horas_min_default"],
+            "max": cfg["horas_max_default"],
             "horas": 0,
             "disp": {},
             "asignaciones": []
         }
         
-        # Disponibilidad por día
         dias_unicos = set(k.split('_')[0] for k in col_mapping.keys())
         
         for dia in dias_unicos:
@@ -249,49 +190,27 @@ def cargar_monitores():
         
         monitores.append(mon)
     
-    print(f"✅ {len(monitores)} monitores cargados")
-    
     return monitores
 
 
-# ========================================================
-# CARGA DE ESPACIOS
-# ========================================================
-
-def cargar_espacios():
-    """Carga espacios desde Excel formato lista"""
+def cargar_espacios_desde_excel(ruta):
+    """Carga espacios desde Excel"""
     cfg = CONFIG["espacios"]
     
-    print(f"\n📂 Cargando espacios: {cfg['archivo']}")
+    df = pd.read_excel(ruta, sheet_name=0)
     
-    df = pd.read_excel(cfg["archivo"], sheet_name=cfg["hoja"])
-    
-    # Validar columnas
     columnas_req = [cfg["col_sala"], cfg["col_dia"], cfg["col_hora_inicio"], 
                     cfg["col_hora_fin"], cfg["col_curso"]]
     
-    for col in columnas_req:
-        if col not in df.columns:
-            print(f"❌ Error: Columna '{col}' no encontrada")
-            print(f"   Columnas disponibles: {list(df.columns)}")
-            return pd.DataFrame()
+    faltantes = [col for col in columnas_req if col not in df.columns]
+    if faltantes:
+        raise ValueError(f"Columnas no encontradas: {faltantes}")
     
-    # Normalizar días
     df['DIA_NORM'] = df[cfg["col_dia"]].apply(normalizar_dia)
-    
-    # Calcular duración
     df['DURACION'] = df[cfg["col_hora_fin"]] - df[cfg["col_hora_inicio"]]
-    
-    print(f"✅ {len(df)} horarios cargados")
-    print(f"   Salas: {df[cfg['col_sala']].nunique()}")
-    print(f"   Total horas: {df['DURACION'].sum()}")
     
     return df
 
-
-# ========================================================
-# LÓGICA DE ASIGNACIÓN
-# ========================================================
 
 def esta_disponible(monitor, dia, hora_inicio, hora_fin):
     """Verifica disponibilidad del monitor"""
@@ -312,10 +231,8 @@ def verificar_restricciones(monitor, dia, hora_inicio, hora_fin):
     if not cfg.get("max_horas_seguidas"):
         return True
     
-    # Revisar asignaciones del mismo día
     for asig in monitor["asignaciones"]:
         if asig["dia"] == dia:
-            # Verificar si hay solapamiento o continuidad
             if (hora_inicio <= asig["fin"] and hora_fin >= asig["inicio"]):
                 duracion_total = max(hora_fin, asig["fin"]) - min(hora_inicio, asig["inicio"])
                 if duracion_total > cfg["max_horas_seguidas"]:
@@ -329,24 +246,22 @@ def asignar_monitores(monitores, df_espacios):
     cfg_asig = CONFIG["asignacion"]
     cfg_esp = CONFIG["espacios"]
     
-    print(f"\n🔄 Iniciando asignación...")
-    
     asignaciones = []
     sin_monitor = []
     
     espacios = df_espacios.to_dict('records')
     
-    # Primera pasada: priorizar alcanzar mínimo
+    # Fase 1: Priorizar mínimo
     if cfg_asig.get("priorizar_minimo"):
-        print("   Fase 1: Alcanzando mínimos...")
-        
         for espacio in espacios:
             dia = espacio['DIA_NORM']
+            if pd.isna(dia):
+                continue
+                
             inicio = espacio[cfg_esp["col_hora_inicio"]]
             fin = espacio[cfg_esp["col_hora_fin"]]
             duracion = espacio['DURACION']
             
-            # Buscar monitores bajo el mínimo
             candidatos = [
                 m for m in monitores
                 if m["horas"] < m["min"]
@@ -356,7 +271,6 @@ def asignar_monitores(monitores, df_espacios):
             ]
             
             if candidatos:
-                # Asignar al que más le falta
                 candidatos.sort(key=lambda x: x["min"] - x["horas"], reverse=True)
                 elegido = candidatos[0]
                 
@@ -373,11 +287,18 @@ def asignar_monitores(monitores, df_espacios):
                     "ESTADO": "✅"
                 })
     
-    # Segunda pasada: asignar restantes
-    print("   Fase 2: Asignando restantes...")
-    
+    # Fase 2: Asignar restantes
     for espacio in espacios:
-        # Verificar si ya fue asignado
+        dia = espacio['DIA_NORM']
+        if pd.isna(dia):
+            sin_monitor.append(espacio)
+            asignaciones.append({
+                **espacio,
+                "MONITOR": "DÍA INVÁLIDO",
+                "ESTADO": "❌"
+            })
+            continue
+            
         ya_asignado = any(
             a.get(cfg_esp["col_sala"]) == espacio[cfg_esp["col_sala"]] and
             a.get('DIA_NORM') == espacio['DIA_NORM'] and
@@ -388,12 +309,10 @@ def asignar_monitores(monitores, df_espacios):
         if ya_asignado:
             continue
         
-        dia = espacio['DIA_NORM']
         inicio = espacio[cfg_esp["col_hora_inicio"]]
         fin = espacio[cfg_esp["col_hora_fin"]]
         duracion = espacio['DURACION']
         
-        # Buscar candidatos
         candidatos = [
             m for m in monitores
             if m["horas"] + duracion <= m["max"]
@@ -410,7 +329,6 @@ def asignar_monitores(monitores, df_espacios):
             })
             continue
         
-        # Estrategia de balanceo
         if cfg_asig.get("balancear_carga"):
             candidatos.sort(key=lambda x: x["horas"])
         
@@ -428,402 +346,352 @@ def asignar_monitores(monitores, df_espacios):
             "ESTADO": "✅"
         })
     
-    return asignaciones, sin_monitor
+    return asignaciones, sin_monitor, monitores
 
 
 # ========================================================
-# REPORTES
+# MODELO PARA TABLA
 # ========================================================
+class PandasModel(QAbstractTableModel):
+    def __init__(self, df=pd.DataFrame()):
+        super().__init__()
+        self._df = df
 
-def generar_reporte(monitores, asignaciones, sin_monitor):
-    """Reporte en consola"""
-    cfg_esp = CONFIG["espacios"]
+    def rowCount(self, parent=None):
+        return self._df.shape[0]
+
+    def columnCount(self, parent=None):
+        return self._df.shape[1]
+
+    def data(self, index, role=Qt.DisplayRole):
+        if role == Qt.DisplayRole:
+            return str(self._df.iat[index.row(), index.column()])
+
+    def headerData(self, section, orientation, role):
+        if role == Qt.DisplayRole:
+            if orientation == Qt.Horizontal:
+                return self._df.columns[section]
+            return section
+
+
+# ========================================================
+# HILO PARA PROCESAMIENTO
+# ========================================================
+class AsignacionThread(QThread):
+    finished = Signal(pd.DataFrame, list, str)
+    error = Signal(str)
+    progress = Signal(str)
     
-    print("\n" + "="*70)
-    print("📊 REPORTE DE ASIGNACIÓN")
-    print("="*70)
+    def __init__(self, monitores, df_espacios):
+        super().__init__()
+        self.monitores = monitores
+        self.df_espacios = df_espacios
     
-    exitosos = len([a for a in asignaciones if a["ESTADO"] == "✅"])
-    total = len(asignaciones)
-    
-    print(f"\n🎯 Resumen:")
-    print(f"   Total horarios: {total}")
-    print(f"   Asignados: {exitosos} ({exitosos*100/total:.1f}%)")
-    print(f"   Sin monitor: {len(sin_monitor)} ({len(sin_monitor)*100/total:.1f}%)")
-    
-    # Por sala
-    df = pd.DataFrame(asignaciones)
-    print(f"\n🏢 Por Sala:")
-    for sala in sorted(df[cfg_esp["col_sala"]].unique()):
-        sala_df = df[df[cfg_esp["col_sala"]] == sala]
-        asig = len(sala_df[sala_df['ESTADO'] == '✅'])
-        print(f"   {sala:20} | {asig:3}/{len(sala_df):3} ({asig*100/len(sala_df):5.1f}%)")
-    
-    # Monitores
-    print(f"\n👥 Monitores:")
-    print("-" * 70)
-    
-    for m in sorted(monitores, key=lambda x: x["horas"], reverse=True):
-        if m["horas"] > 0:
-            pct = (m["horas"] / m["max"]) * 100
-            barra = "█" * int(pct / 5)
+    def run(self):
+        try:
+            self.progress.emit("🔄 Iniciando asignación...")
             
-            status = "✅"
-            if m["horas"] < m["min"]:
-                status = f"⚠️  <{m['min']}h"
-            elif m["horas"] > m["max"]:
-                status = f"❌ >{m['max']}h"
+            asignaciones, sin_monitor, monitores = asignar_monitores(
+                self.monitores, 
+                self.df_espacios
+            )
             
-            print(f"{m['nombre'][:35]:35} | {m['horas']:2}h {barra:20} {status}")
-    
-    sin_carga = [m for m in monitores if m["horas"] == 0]
-    if sin_carga:
-        print(f"\n⚠️  Sin asignaciones ({len(sin_carga)}):")
-        for m in sin_carga[:5]:
-            print(f"   • {m['nombre']}")
-
-
-def exportar_resultados(asignaciones, monitores):
-    """Exporta a Excel en múltiples formatos"""
-    cfg = CONFIG["salida"]
-    cfg_esp = CONFIG["espacios"]
-    
-    df_asig = pd.DataFrame(asignaciones)
-    
-    # HOJA 1: Horarios visuales de TODAS las salas en una sola hoja
-    # HOJA 2: Lista de asignaciones
-    # HOJA 3: Monitores
-    
-    df_lista = df_asig.copy()
-    
-    df_mon = pd.DataFrame([{
-        'Monitor': m['nombre'],
-        'Horas': m['horas'],
-        'Min': m['min'],
-        'Max': m['max'],
-        'Horarios': len(m['asignaciones']),
-        'Estado': '✅' if m['min'] <= m['horas'] <= m['max'] else '⚠️'
-    } for m in monitores]).sort_values('Horas', ascending=False)
-    
-    salas = sorted(df_asig[cfg_esp["col_sala"]].unique())
-    
-    with pd.ExcelWriter(cfg["archivo"], engine='openpyxl') as writer:
-        # HOJA 1: Crear horario consolidado con todas las salas
-        crear_horario_consolidado(writer, df_asig, salas, cfg_esp)
-        
-        # HOJA 2: Horario individual de cada monitor
-        crear_horario_monitores(writer, monitores, df_asig, cfg_esp)
-        
-        # HOJA 3 y 4: Lista y resumen
-        df_lista.to_excel(writer, sheet_name='Lista Asignaciones', index=False)
-        df_mon.to_excel(writer, sheet_name='Resumen Monitores', index=False)
-    
-    print(f"\n✅ Exportado: {cfg['archivo']}")
-    print(f"   📄 Hojas generadas:")
-    print(f"      • Horarios Salas (todas las salas)")
-    print(f"      • Horarios Monitores (detalle por monitor)")
-    print(f"      • Lista Asignaciones")
-    print(f"      • Resumen Monitores")
-
-
-def crear_horario_monitores(writer, monitores, df_asig, cfg_esp):
-    """Crea horario detallado de cada monitor en una sola hoja"""
-    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
-    from openpyxl.utils import get_column_letter
-    
-    # Crear hoja
-    workbook = writer.book
-    worksheet = workbook.create_sheet('Horarios Monitores', 1)
-    
-    # Estilos
-    color_monitor = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-    color_header = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
-    color_clase = PatternFill(start_color="90EE90", end_color="90EE90", fill_type="solid")
-    color_vacio = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
-    
-    fuente_monitor = Font(bold=True, size=12, color="FFFFFF")
-    fuente_header = Font(bold=True, size=10, color="000000")
-    fuente_normal = Font(size=8, color="000000")
-    
-    alineacion_centro = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    
-    borde = Border(
-        left=Side(style='thin', color='000000'),
-        right=Side(style='thin', color='000000'),
-        top=Side(style='thin', color='000000'),
-        bottom=Side(style='thin', color='000000')
-    )
-    
-    dias = ['Lunes', 'Martes', 'Miercoles', 'Jueves', 'Viernes', 'Sabado']
-    
-    # Determinar rango de horas
-    hora_min = int(df_asig[cfg_esp["col_hora_inicio"]].min())
-    hora_max = int(df_asig[cfg_esp["col_hora_fin"]].max())
-    
-    fila_actual = 1
-    
-    # Filtrar solo monitores con asignaciones
-    monitores_activos = [m for m in monitores if m["horas"] > 0]
-    monitores_activos.sort(key=lambda x: x["nombre"])
-    
-    for monitor in monitores_activos:
-        # Título con nombre del monitor y total de horas
-        worksheet.merge_cells(start_row=fila_actual, start_column=1, 
-                             end_row=fila_actual, end_column=7)
-        cell_titulo = worksheet.cell(row=fila_actual, column=1)
-        cell_titulo.value = f"{monitor['nombre']} - {monitor['horas']} horas"
-        cell_titulo.fill = color_monitor
-        cell_titulo.font = fuente_monitor
-        cell_titulo.alignment = alineacion_centro
-        cell_titulo.border = borde
-        fila_actual += 1
-        
-        # Encabezados de días
-        worksheet.cell(row=fila_actual, column=1).value = "Hora"
-        for idx, dia in enumerate(dias, start=2):
-            cell = worksheet.cell(row=fila_actual, column=idx)
-            cell.value = dia
-            cell.fill = color_header
-            cell.font = fuente_header
-            cell.alignment = alineacion_centro
-            cell.border = borde
-        
-        cell_hora_header = worksheet.cell(row=fila_actual, column=1)
-        cell_hora_header.fill = color_header
-        cell_hora_header.font = fuente_header
-        cell_hora_header.alignment = alineacion_centro
-        cell_hora_header.border = borde
-        fila_actual += 1
-        
-        # Obtener asignaciones del monitor
-        asignaciones_monitor = df_asig[df_asig['MONITOR'] == monitor['nombre']]
-        
-        # Crear matriz de horarios
-        for hora in range(hora_min, hora_max):
-            hora_str = f"{hora}-{hora+1}"
+            df_result = pd.DataFrame(asignaciones)
             
-            # Columna de hora
-            cell_hora = worksheet.cell(row=fila_actual, column=1)
-            cell_hora.value = hora_str
-            cell_hora.fill = color_header
-            cell_hora.font = fuente_header
-            cell_hora.alignment = alineacion_centro
-            cell_hora.border = borde
+            # Generar reporte
+            exitosos = len([a for a in asignaciones if a["ESTADO"] == "✅"])
+            total = len(asignaciones)
             
-            # Procesar cada día
-            for idx_dia, dia in enumerate(dias, start=2):
-                cell = worksheet.cell(row=fila_actual, column=idx_dia)
-                cell.border = borde
-                cell.alignment = alineacion_centro
-                
-                # Buscar asignaciones para este día/hora
-                dia_norm = dia.lower()
-                asig_celda = asignaciones_monitor[
-                    (asignaciones_monitor['DIA_NORM'] == dia_norm) &
-                    (asignaciones_monitor[cfg_esp["col_hora_inicio"]] <= hora) &
-                    (asignaciones_monitor[cfg_esp["col_hora_fin"]] > hora)
-                ]
-                
-                if len(asig_celda) > 0:
-                    asig = asig_celda.iloc[0]
-                    curso = asig[cfg_esp["col_curso"]]
-                    sala = asig[cfg_esp["col_sala"]]
+            reporte = f"""
+📊 REPORTE DE ASIGNACIÓN
+{'='*50}
+
+🎯 Resumen:
+   Total horarios: {total}
+   Asignados: {exitosos} ({exitosos*100/total:.1f}%)
+   Sin monitor: {len(sin_monitor)} ({len(sin_monitor)*100/total:.1f}%)
+
+👥 Monitores:
+"""
+            
+            for m in sorted(monitores, key=lambda x: x["horas"], reverse=True):
+                if m["horas"] > 0:
+                    status = "✅"
+                    if m["horas"] < m["min"]:
+                        status = f"⚠️ <{m['min']}h"
+                    elif m["horas"] > m["max"]:
+                        status = f"❌ >{m['max']}h"
                     
-                    cell.value = f"{sala}\n{curso}"
-                    cell.fill = color_clase
-                    cell.font = fuente_normal
-                else:
-                    cell.value = ""
-                    cell.fill = color_vacio
+                    reporte += f"\n   {m['nombre'][:30]:30} | {m['horas']:2}h {status}"
             
-            fila_actual += 1
-        
-        # Fila vacía entre monitores
-        fila_actual += 2
-    
-    # Ajustar anchos
-    worksheet.column_dimensions['A'].width = 10
-    for col in range(2, 8):
-        worksheet.column_dimensions[get_column_letter(col)].width = 22
-    
-    # Ajustar altura
-    for row in range(1, fila_actual):
-        worksheet.row_dimensions[row].height = 35
+            self.progress.emit("✅ Asignación completada")
+            self.finished.emit(df_result, monitores, reporte)
+            
+        except Exception as e:
+            self.error.emit(str(e))
 
 
-def crear_horario_consolidado(writer, df_asig, salas, cfg_esp):
-    """Crea horario visual con todas las salas HORIZONTALMENTE (lado a lado)"""
-    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
-    from openpyxl.utils import get_column_letter
-    
-    workbook = writer.book
-    worksheet = workbook.create_sheet('Horarios', 0)
-    
-    # Estilos
-    color_naranja = PatternFill(start_color="FFA500", end_color="FFA500", fill_type="solid")
-    color_verde = PatternFill(start_color="90EE90", end_color="90EE90", fill_type="solid")
-    color_azul = PatternFill(start_color="87CEEB", end_color="87CEEB", fill_type="solid")
-    color_vacio = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
-    color_sin_monitor = PatternFill(start_color="FFB6C1", end_color="FFB6C1", fill_type="solid")
-    color_header = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
-    color_titulo_sala = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-    
-    fuente_negra = Font(bold=False, size=8, color="000000")
-    fuente_header = Font(bold=True, size=9, color="000000")
-    fuente_titulo = Font(bold=True, size=11, color="FFFFFF")
-    
-    alineacion_centro = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    
-    borde = Border(
-        left=Side(style='thin', color='000000'),
-        right=Side(style='thin', color='000000'),
-        top=Side(style='thin', color='000000'),
-        bottom=Side(style='thin', color='000000')
-    )
-    
-    dias = ['Lunes', 'Martes', 'Miercoles', 'Jueves', 'Viernes', 'Sabado']
-    
-    # Rango de horas
-    hora_min = int(df_asig[cfg_esp["col_hora_inicio"]].min())
-    hora_max = int(df_asig[cfg_esp["col_hora_fin"]].max())
-    
-    # ESTRUCTURA HORIZONTAL:
-    # Fila 1: Títulos de salas (cada sala ocupa 7 columnas: 1 hora + 6 días)
-    # Fila 2: Días de la semana (repetidos para cada sala)
-    # Fila 3+: Horas + celdas de horario
-    
-    columna_actual = 1
-    
-    # Fila 1: Títulos de salas
-    for sala in salas:
-        # Título de sala (merge de 7 columnas)
-        worksheet.merge_cells(
-            start_row=1, 
-            start_column=columna_actual, 
-            end_row=1, 
-            end_column=columna_actual + 6
+# ========================================================
+# VENTANA PRINCIPAL
+# ========================================================
+class MainWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        self.setWindowTitle("Gestor de Monitores – Sistema Completo")
+        self.setMinimumSize(1100, 700)
+
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #F4F6F9;
+                font-family: 'Segoe UI';
+                font-size: 14px;
+            }
+            QPushButton {
+                background-color: #0078D4;
+                color: white;
+                padding: 12px;
+                border-radius: 8px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #005A9E;
+            }
+            QPushButton:disabled {
+                background-color: #CCCCCC;
+                color: #666666;
+            }
+            QTableView {
+                background: white;
+                border-radius: 8px;
+                border: 1px solid #DDD;
+            }
+            QTextEdit {
+                background: white;
+                border-radius: 8px;
+                border: 1px solid #DDD;
+                padding: 10px;
+                font-family: 'Consolas', monospace;
+                font-size: 12px;
+            }
+            QLabel {
+                color: #333;
+            }
+        """)
+
+        layout = QVBoxLayout()
+
+        # Título
+        title = QLabel("🎯 Sistema de Asignación de Monitores")
+        title.setFont(QFont("Segoe UI", 22, QFont.Bold))
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+
+        # Subtítulo con instrucciones
+        subtitle = QLabel("1️⃣ Carga Monitores → 2️⃣ Carga Espacios → 3️⃣ Asignar → 4️⃣ Exportar")
+        subtitle.setFont(QFont("Segoe UI", 11))
+        subtitle.setAlignment(Qt.AlignCenter)
+        subtitle.setStyleSheet("color: #666; margin-bottom: 10px;")
+        layout.addWidget(subtitle)
+
+        # Botones superiores
+        btn_layout = QHBoxLayout()
+
+        self.btn_monitores = QPushButton("📁 Cargar Monitores")
+        self.btn_espacios = QPushButton("📁 Cargar Espacios")
+        self.btn_asignar = QPushButton("⚡ Asignar Automáticamente")
+        self.btn_exportar = QPushButton("💾 Exportar Resultados")
+
+        self.btn_asignar.setEnabled(False)
+        self.btn_exportar.setEnabled(False)
+
+        btn_layout.addWidget(self.btn_monitores)
+        btn_layout.addWidget(self.btn_espacios)
+        btn_layout.addWidget(self.btn_asignar)
+        btn_layout.addWidget(self.btn_exportar)
+
+        layout.addLayout(btn_layout)
+
+        # Barra de progreso
+        self.progress = QProgressBar()
+        self.progress.setVisible(False)
+        self.progress.setStyleSheet("""
+            QProgressBar {
+                border: 2px solid #DDD;
+                border-radius: 5px;
+                text-align: center;
+                height: 25px;
+            }
+            QProgressBar::chunk {
+                background-color: #0078D4;
+            }
+        """)
+        layout.addWidget(self.progress)
+
+        # Etiqueta de estado
+        self.lbl_estado = QLabel("📋 Esperando archivos...")
+        self.lbl_estado.setFont(QFont("Segoe UI", 10))
+        self.lbl_estado.setStyleSheet("color: #666; padding: 5px;")
+        layout.addWidget(self.lbl_estado)
+
+        # Tabla de resultados
+        self.table = QTableView()
+        layout.addWidget(self.table, stretch=3)
+
+        # Área de texto para reporte
+        self.text_reporte = QTextEdit()
+        self.text_reporte.setReadOnly(True)
+        self.text_reporte.setPlaceholderText("El reporte de asignación aparecerá aquí...")
+        layout.addWidget(self.text_reporte, stretch=2)
+
+        self.setLayout(layout)
+
+        # Conectar funciones
+        self.btn_monitores.clicked.connect(self.cargar_monitores)
+        self.btn_espacios.clicked.connect(self.cargar_espacios)
+        self.btn_asignar.clicked.connect(self.iniciar_asignacion)
+        self.btn_exportar.clicked.connect(self.exportar)
+
+        # Variables de datos
+        self.monitores = []
+        self.df_espacios = pd.DataFrame()
+        self.df_resultado = pd.DataFrame()
+        self.monitores_asignados = []
+
+    def cargar_monitores(self):
+        ruta, _ = QFileDialog.getOpenFileName(
+            self, "Seleccionar archivo de monitores", "", 
+            "Archivos Excel (*.xlsx *.xls)"
         )
-        cell_titulo = worksheet.cell(row=1, column=columna_actual)
-        cell_titulo.value = sala
-        cell_titulo.fill = color_titulo_sala
-        cell_titulo.font = fuente_titulo
-        cell_titulo.alignment = alineacion_centro
-        cell_titulo.border = borde
         
-        # Fila 2: Encabezados de días
-        cell_hora_header = worksheet.cell(row=2, column=columna_actual)
-        cell_hora_header.value = "Hora"
-        cell_hora_header.fill = color_header
-        cell_hora_header.font = fuente_header
-        cell_hora_header.alignment = alineacion_centro
-        cell_hora_header.border = borde
-        
-        for idx_dia, dia in enumerate(dias, start=1):
-            cell = worksheet.cell(row=2, column=columna_actual + idx_dia)
-            cell.value = dia
-            cell.fill = color_header
-            cell.font = fuente_header
-            cell.alignment = alineacion_centro
-            cell.border = borde
-        
-        columna_actual += 7  # Siguiente sala
-    
-    # Filas 3+: Horas y datos
-    for fila_hora, hora in enumerate(range(hora_min, hora_max), start=3):
-        hora_str = f"{hora}:00-{hora+1}:00"
-        
-        columna_actual = 1
-        
-        for sala in salas:
-            df_sala = df_asig[df_asig[cfg_esp["col_sala"]] == sala]
-            
-            # Columna de hora
-            cell_hora = worksheet.cell(row=fila_hora, column=columna_actual)
-            cell_hora.value = hora_str
-            cell_hora.fill = color_header
-            cell_hora.font = fuente_header
-            cell_hora.alignment = alineacion_centro
-            cell_hora.border = borde
-            
-            # Procesar cada día
-            for idx_dia, dia in enumerate(dias, start=1):
-                cell = worksheet.cell(row=fila_hora, column=columna_actual + idx_dia)
-                cell.border = borde
-                cell.alignment = alineacion_centro
+        if ruta:
+            try:
+                self.monitores = cargar_monitores_desde_excel(ruta)
                 
-                dia_norm = dia.lower()
-                asignaciones_celda = df_sala[
-                    (df_sala['DIA_NORM'] == dia_norm) &
-                    (df_sala[cfg_esp["col_hora_inicio"]] <= hora) &
-                    (df_sala[cfg_esp["col_hora_fin"]] > hora)
-                ]
+                df_preview = pd.DataFrame([{
+                    'Nombre': m['nombre'],
+                    'Min': m['min'],
+                    'Max': m['max']
+                } for m in self.monitores])
                 
-                if len(asignaciones_celda) > 0:
-                    asig = asignaciones_celda.iloc[0]
-                    curso = asig[cfg_esp["col_curso"]]
-                    monitor = asig['MONITOR']
-                    
-                    if monitor == "SIN MONITOR":
-                        cell.value = f"{curso}\n❌ SIN MONITOR"
-                        cell.fill = color_sin_monitor
-                        cell.font = Font(size=7, color="FF0000", bold=True)
-                    else:
-                        nombre_corto = monitor.split()[0] if monitor else ""
-                        cell.value = f"{curso}\n{nombre_corto}"
-                        cell.font = fuente_negra
-                        
-                        hash_val = hash(monitor) % 3
-                        if hash_val == 0:
-                            cell.fill = color_naranja
-                        elif hash_val == 1:
-                            cell.fill = color_verde
-                        else:
-                            cell.fill = color_azul
-                else:
-                    cell.value = ""
-                    cell.fill = color_vacio
-            
-            columna_actual += 7  # Siguiente sala
-    
-    # Ajustar anchos de columna
-    for col_num in range(1, columna_actual):
-        col_letter = get_column_letter(col_num)
-        if (col_num - 1) % 7 == 0:  # Columnas de hora
-            worksheet.column_dimensions[col_letter].width = 11
-        else:  # Columnas de días
-            worksheet.column_dimensions[col_letter].width = 18
-    
-    # Ajustar altura de filas
-    worksheet.row_dimensions[1].height = 25  # Títulos
-    worksheet.row_dimensions[2].height = 20  # Días
-    for row in range(3, fila_hora + 1):
-        worksheet.row_dimensions[row].height = 35
+                self.table.setModel(PandasModel(df_preview))
+                self.lbl_estado.setText(f"✅ {len(self.monitores)} monitores cargados")
+                self.text_reporte.setPlainText(f"📂 Monitores cargados: {len(self.monitores)}")
+                
+                self.verificar_listo()
+                
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Error al cargar monitores:\n{str(e)}")
+
+    def cargar_espacios(self):
+        ruta, _ = QFileDialog.getOpenFileName(
+            self, "Seleccionar archivo de espacios", "", 
+            "Archivos Excel (*.xlsx *.xls)"
+        )
+        
+        if ruta:
+            try:
+                self.df_espacios = cargar_espacios_desde_excel(ruta)
+                
+                self.table.setModel(PandasModel(self.df_espacios.head(50)))
+                self.lbl_estado.setText(f"✅ {len(self.df_espacios)} horarios cargados")
+                self.text_reporte.setPlainText(
+                    f"📂 Espacios cargados: {len(self.df_espacios)} horarios\n"
+                    f"🏢 Salas: {self.df_espacios['SALA'].nunique()}\n"
+                    f"⏱️  Total horas: {self.df_espacios['DURACION'].sum()}"
+                )
+                
+                self.verificar_listo()
+                
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Error al cargar espacios:\n{str(e)}")
+
+    def verificar_listo(self):
+        if len(self.monitores) > 0 and len(self.df_espacios) > 0:
+            self.btn_asignar.setEnabled(True)
+            self.lbl_estado.setText("✅ Listo para asignar")
+
+    def iniciar_asignacion(self):
+        self.btn_asignar.setEnabled(False)
+        self.progress.setVisible(True)
+        self.progress.setRange(0, 0)  # Indeterminado
+        
+        # Crear copia de monitores para el thread
+        import copy
+        monitores_copy = copy.deepcopy(self.monitores)
+        
+        self.thread = AsignacionThread(monitores_copy, self.df_espacios)
+        self.thread.finished.connect(self.asignacion_completada)
+        self.thread.error.connect(self.asignacion_error)
+        self.thread.progress.connect(self.actualizar_progreso)
+        self.thread.start()
+
+    def actualizar_progreso(self, mensaje):
+        self.lbl_estado.setText(mensaje)
+
+    def asignacion_completada(self, df_resultado, monitores, reporte):
+        self.df_resultado = df_resultado
+        self.monitores_asignados = monitores
+        
+        self.table.setModel(PandasModel(df_resultado))
+        self.text_reporte.setPlainText(reporte)
+        
+        self.progress.setVisible(False)
+        self.btn_asignar.setEnabled(True)
+        self.btn_exportar.setEnabled(True)
+        
+        self.lbl_estado.setText("✅ Asignación completada exitosamente")
+        
+        QMessageBox.information(
+            self, 
+            "Completado", 
+            "✅ Asignación completada\n\nRevisa los resultados en la tabla y el reporte."
+        )
+
+    def asignacion_error(self, error):
+        self.progress.setVisible(False)
+        self.btn_asignar.setEnabled(True)
+        
+        QMessageBox.critical(self, "Error", f"Error en la asignación:\n{error}")
+        self.lbl_estado.setText("❌ Error en la asignación")
+
+    def exportar(self):
+        if self.df_resultado.empty:
+            QMessageBox.warning(self, "Advertencia", "No hay resultados para exportar")
+            return
+        
+        ruta, _ = QFileDialog.getSaveFileName(
+            self, "Guardar archivo", "Asignacion_Monitores.xlsx",
+            "Archivos Excel (*.xlsx)"
+        )
+        
+        if ruta:
+            try:
+                df_mon = pd.DataFrame([{
+                    'Monitor': m['nombre'],
+                    'Horas': m['horas'],
+                    'Min': m['min'],
+                    'Max': m['max'],
+                    'Horarios': len(m['asignaciones']),
+                    'Estado': '✅' if m['min'] <= m['horas'] <= m['max'] else '⚠️'
+                } for m in self.monitores_asignados]).sort_values('Horas', ascending=False)
+                
+                with pd.ExcelWriter(ruta, engine='openpyxl') as writer:
+                    self.df_resultado.to_excel(writer, sheet_name='Asignaciones', index=False)
+                    df_mon.to_excel(writer, sheet_name='Resumen Monitores', index=False)
+                
+                QMessageBox.information(self, "Exportado", f"✅ Archivo guardado:\n{ruta}")
+                self.lbl_estado.setText(f"✅ Exportado: {ruta}")
+                
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Error al exportar:\n{str(e)}")
 
 
 # ========================================================
-# MAIN
+# EJECUTAR APLICACIÓN
 # ========================================================
-
 if __name__ == "__main__":
-    print("="*70)
-    print("🚀 SISTEMA DE ASIGNACIÓN DE MONITORES")
-    print("="*70)
-    
-    try:
-        monitores = cargar_monitores()
-        df_espacios = cargar_espacios()
-        
-        if not monitores or len(df_espacios) == 0:
-            print("\n❌ No se cargaron datos")
-            exit(1)
-        
-        asignaciones, sin_monitor = asignar_monitores(monitores, df_espacios)
-        generar_reporte(monitores, asignaciones, sin_monitor)
-        exportar_resultados(asignaciones, monitores)
-        
-        print("\n✨ ¡Completado!")
-        
-    except Exception as e:
-        print(f"\n❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
