@@ -4,7 +4,7 @@ import re
 from PySide6.QtWidgets import (
     QApplication, QWidget, QPushButton, QVBoxLayout, 
     QHBoxLayout, QTableView, QFileDialog, QLabel, QMessageBox,
-    QProgressBar, QTextEdit
+    QProgressBar, QTextEdit, QCheckBox, QFrame, QGridLayout, QDialog, QSizePolicy, QTabWidget
 )
 from PySide6.QtCore import Qt, QAbstractTableModel, QThread, Signal
 from PySide6.QtGui import QFont
@@ -18,6 +18,7 @@ CONFIG = {
         "header_row": 4,
         "data_start_row": 5,
         "col_nombre": "Nombre completo",
+        "col_prioridad": "Prioridad",
         "col_min": None,
         "col_max": None,
         "horas_min_default": 8,
@@ -33,6 +34,7 @@ CONFIG = {
     "asignacion": {
         "balancear_carga": True,
         "priorizar_minimo": True,
+        "usar_prioridad": True,
         "max_horas_seguidas": 4,
         "descanso_minimo": 1,
         "permitir_sobrepasar_max": False
@@ -41,113 +43,96 @@ CONFIG = {
 
 
 # ========================================================
-# FUNCIONES DE LÓGICA DE ASIGNACIÓN
+# FUNCIONES DE LÓGICA (mismas que antes)
 # ========================================================
 
 def parse_time_str(time_str):
-    """Convierte '7:00am' -> 7, '2:00pm' -> 14"""
     if pd.isna(time_str):
         return None
-    
     s = str(time_str).strip().lower()
     match = re.search(r'(\d{1,2})(?::(\d{2}))?\s*(am|pm)', s)
     if match:
         hour = int(match.group(1))
         meridiem = match.group(3)
-        
         if meridiem == 'pm' and hour != 12:
             hour += 12
         elif meridiem == 'am' and hour == 12:
             hour = 0
-        
         return hour
-    
     match = re.search(r'\d+', s)
     if match:
         return int(match.group(0))
-    
     return None
 
 
 def parse_range_cell(cell_value):
-    """Convierte '7:00am-1:00pm' -> [(7, 13)]"""
     if pd.isna(cell_value):
         return []
-    
     s = str(cell_value).strip().lower()
-    
     if s in ["libre", "disponible", "todo el día", "todo el dia"]:
         return [(7, 22)]
-    
     if s in ["no disponible", "no", "n/a", "", "nan"]:
         return []
-    
     ranges = []
     pattern = r'(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s*-\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)'
-    
     matches = re.findall(pattern, s)
     for match in matches:
         start = parse_time_str(match[0])
         end = parse_time_str(match[1])
-        
         if start is not None and end is not None:
             ranges.append((start, end))
-    
     return ranges
 
 
 def normalizar_dia(dia):
-    """Normaliza nombres de días"""
     if pd.isna(dia):
         return None
-    
     d = str(dia).strip().lower()
     d = d.replace('á', 'a').replace('é', 'e').replace('í', 'i').replace('ó', 'o').replace('ú', 'u')
     d = re.sub(r'[^a-z]', '', d)
-    
     mapeo = {
-        'lun': 'lunes',
-        'mar': 'martes',
-        'mie': 'miercoles',
-        'jue': 'jueves',
-        'vie': 'viernes',
-        'sab': 'sabado',
-        'dom': 'domingo'
+        'lun': 'lunes', 'mar': 'martes', 'mie': 'miercoles',
+        'jue': 'jueves', 'vie': 'viernes', 'sab': 'sabado', 'dom': 'domingo'
     }
-    
     for abrev, completo in mapeo.items():
         if d.startswith(abrev):
             return completo
-    
     if d in mapeo.values():
         return d
-    
     return d if len(d) >= 3 else None
 
 
+def parse_prioridad(valor):
+    if pd.isna(valor):
+        return 3
+    try:
+        prioridad = int(valor)
+        if 1 <= prioridad <= 5:
+            return prioridad
+        return 3
+    except:
+        return 3
+
+
 def cargar_monitores_desde_excel(ruta):
-    """Carga monitores desde Excel"""
     cfg = CONFIG["monitores"]
-    
     df_raw = pd.read_excel(ruta, sheet_name=0, header=None)
-    
     dias_row = df_raw.iloc[3]
     jornadas_row = df_raw.iloc[cfg["header_row"]]
-    
     col_mapping = {}
     current_dia = None
     col_nombre_idx = None
+    col_prioridad_idx = None
     
     for idx, val in enumerate(jornadas_row):
         val_str = str(val).strip()
-        
         if val_str == cfg["col_nombre"]:
             col_nombre_idx = idx
-        
+        if val_str == cfg["col_prioridad"]:
+            col_prioridad_idx = idx
         dia_val = dias_row[idx] if idx < len(dias_row) else None
         if pd.notna(dia_val) and str(dia_val).strip():
             current_dia = normalizar_dia(dia_val)
-        
         val_lower = val_str.lower()
         if val_lower in ['mañana', 'manana', 'tarde', 'noche']:
             if current_dia:
@@ -158,110 +143,87 @@ def cargar_monitores_desde_excel(ruta):
         raise ValueError(f"No se encuentra la columna '{cfg['col_nombre']}'")
     
     monitores = []
-    
     for row_idx in range(cfg["data_start_row"], len(df_raw)):
         row = df_raw.iloc[row_idx]
-        
         nombre = row[col_nombre_idx]
         if pd.isna(nombre) or str(nombre).strip() == "":
             continue
-        
+        prioridad = 3
+        if col_prioridad_idx is not None:
+            prioridad = parse_prioridad(row[col_prioridad_idx])
         mon = {
             "id": row_idx - cfg["data_start_row"],
             "nombre": str(nombre).strip(),
+            "prioridad": prioridad,
             "min": cfg["horas_min_default"],
             "max": cfg["horas_max_default"],
             "horas": 0,
             "disp": {},
             "asignaciones": []
         }
-        
         dias_unicos = set(k.split('_')[0] for k in col_mapping.keys())
-        
         for dia in dias_unicos:
             mon["disp"][dia] = []
-            
             for jornada in ['mañana', 'manana', 'tarde', 'noche']:
                 key = f"{dia}_{jornada}"
                 if key in col_mapping:
                     col_idx = col_mapping[key]
                     ranges = parse_range_cell(row[col_idx])
                     mon["disp"][dia].extend(ranges)
-        
         monitores.append(mon)
-    
     return monitores
 
 
 def cargar_espacios_desde_excel(ruta):
-    """Carga espacios desde Excel"""
     cfg = CONFIG["espacios"]
-    
     df = pd.read_excel(ruta, sheet_name=0)
-    
     columnas_req = [cfg["col_sala"], cfg["col_dia"], cfg["col_hora_inicio"], 
                     cfg["col_hora_fin"], cfg["col_curso"]]
-    
     faltantes = [col for col in columnas_req if col not in df.columns]
     if faltantes:
         raise ValueError(f"Columnas no encontradas: {faltantes}")
-    
     df['DIA_NORM'] = df[cfg["col_dia"]].apply(normalizar_dia)
     df['DURACION'] = df[cfg["col_hora_fin"]] - df[cfg["col_hora_inicio"]]
-    
     return df
 
 
 def esta_disponible(monitor, dia, hora_inicio, hora_fin):
-    """Verifica disponibilidad del monitor"""
     if dia not in monitor["disp"]:
         return False
-    
     for r_inicio, r_fin in monitor["disp"][dia]:
         if hora_inicio >= r_inicio and hora_fin <= r_fin:
             return True
-    
     return False
 
 
 def verificar_restricciones(monitor, dia, hora_inicio, hora_fin):
-    """Verifica restricciones adicionales"""
     cfg = CONFIG["asignacion"]
-    
     if not cfg.get("max_horas_seguidas"):
         return True
-    
     for asig in monitor["asignaciones"]:
         if asig["dia"] == dia:
             if (hora_inicio <= asig["fin"] and hora_fin >= asig["inicio"]):
                 duracion_total = max(hora_fin, asig["fin"]) - min(hora_inicio, asig["inicio"])
                 if duracion_total > cfg["max_horas_seguidas"]:
                     return False
-    
     return True
 
 
 def asignar_monitores(monitores, df_espacios):
-    """Algoritmo principal de asignación"""
     cfg_asig = CONFIG["asignacion"]
     cfg_esp = CONFIG["espacios"]
-    
     asignaciones = []
     sin_monitor = []
-    
     espacios = df_espacios.to_dict('records')
     
-    # Fase 1: Priorizar mínimo
-    if cfg_asig.get("priorizar_minimo"):
+    if cfg_asig.get("usar_prioridad") and cfg_asig.get("priorizar_minimo"):
         for espacio in espacios:
             dia = espacio['DIA_NORM']
             if pd.isna(dia):
                 continue
-                
             inicio = espacio[cfg_esp["col_hora_inicio"]]
             fin = espacio[cfg_esp["col_hora_fin"]]
             duracion = espacio['DURACION']
-            
             candidatos = [
                 m for m in monitores
                 if m["horas"] < m["min"]
@@ -269,89 +231,51 @@ def asignar_monitores(monitores, df_espacios):
                 and esta_disponible(m, dia, inicio, fin)
                 and verificar_restricciones(m, dia, inicio, fin)
             ]
-            
             if candidatos:
-                candidatos.sort(key=lambda x: x["min"] - x["horas"], reverse=True)
+                candidatos.sort(key=lambda x: (x["prioridad"], x["min"] - x["horas"]), reverse=True)
                 elegido = candidatos[0]
-                
                 elegido["horas"] += duracion
-                elegido["asignaciones"].append({
-                    "dia": dia,
-                    "inicio": inicio,
-                    "fin": fin
-                })
-                
-                asignaciones.append({
-                    **espacio,
-                    "MONITOR": elegido["nombre"],
-                    "ESTADO": "✅"
-                })
+                elegido["asignaciones"].append({"dia": dia, "inicio": inicio, "fin": fin})
+                asignaciones.append({**espacio, "MONITOR": elegido["nombre"], "PRIORIDAD": elegido["prioridad"], "ESTADO": "✅"})
     
-    # Fase 2: Asignar restantes
     for espacio in espacios:
         dia = espacio['DIA_NORM']
         if pd.isna(dia):
             sin_monitor.append(espacio)
-            asignaciones.append({
-                **espacio,
-                "MONITOR": "DÍA INVÁLIDO",
-                "ESTADO": "❌"
-            })
+            asignaciones.append({**espacio, "MONITOR": "DÍA INVÁLIDO", "PRIORIDAD": "-", "ESTADO": "❌"})
             continue
-            
         ya_asignado = any(
             a.get(cfg_esp["col_sala"]) == espacio[cfg_esp["col_sala"]] and
             a.get('DIA_NORM') == espacio['DIA_NORM'] and
             a.get(cfg_esp["col_hora_inicio"]) == espacio[cfg_esp["col_hora_inicio"]]
             for a in asignaciones
         )
-        
         if ya_asignado:
             continue
-        
         inicio = espacio[cfg_esp["col_hora_inicio"]]
         fin = espacio[cfg_esp["col_hora_fin"]]
         duracion = espacio['DURACION']
-        
         candidatos = [
             m for m in monitores
             if m["horas"] + duracion <= m["max"]
             and esta_disponible(m, dia, inicio, fin)
             and verificar_restricciones(m, dia, inicio, fin)
         ]
-        
         if not candidatos:
             sin_monitor.append(espacio)
-            asignaciones.append({
-                **espacio,
-                "MONITOR": "SIN MONITOR",
-                "ESTADO": "❌"
-            })
+            asignaciones.append({**espacio, "MONITOR": "SIN MONITOR", "PRIORIDAD": "-", "ESTADO": "❌"})
             continue
-        
-        if cfg_asig.get("balancear_carga"):
+        if cfg_asig.get("usar_prioridad"):
+            candidatos.sort(key=lambda x: (x["prioridad"], -x["horas"]), reverse=True)
+        elif cfg_asig.get("balancear_carga"):
             candidatos.sort(key=lambda x: x["horas"])
-        
         elegido = candidatos[0]
         elegido["horas"] += duracion
-        elegido["asignaciones"].append({
-            "dia": dia,
-            "inicio": inicio,
-            "fin": fin
-        })
-        
-        asignaciones.append({
-            **espacio,
-            "MONITOR": elegido["nombre"],
-            "ESTADO": "✅"
-        })
-    
+        elegido["asignaciones"].append({"dia": dia, "inicio": inicio, "fin": fin})
+        asignaciones.append({**espacio, "MONITOR": elegido["nombre"], "PRIORIDAD": elegido["prioridad"], "ESTADO": "✅"})
     return asignaciones, sin_monitor, monitores
 
 
-# ========================================================
-# MODELO PARA TABLA
-# ========================================================
 class PandasModel(QAbstractTableModel):
     def __init__(self, df=pd.DataFrame()):
         super().__init__()
@@ -374,9 +298,6 @@ class PandasModel(QAbstractTableModel):
             return section
 
 
-# ========================================================
-# HILO PARA PROCESAMIENTO
-# ========================================================
 class AsignacionThread(QThread):
     finished = Signal(pd.DataFrame, list, str)
     error = Signal(str)
@@ -389,242 +310,551 @@ class AsignacionThread(QThread):
     
     def run(self):
         try:
-            self.progress.emit("🔄 Iniciando asignación...")
-            
-            asignaciones, sin_monitor, monitores = asignar_monitores(
-                self.monitores, 
-                self.df_espacios
-            )
-            
+            modo = "con prioridad" if CONFIG["asignacion"]["usar_prioridad"] else "sin prioridad"
+            self.progress.emit(f"🔄 Iniciando asignación {modo}...")
+            asignaciones, sin_monitor, monitores = asignar_monitores(self.monitores, self.df_espacios)
             df_result = pd.DataFrame(asignaciones)
-            
-            # Generar reporte
             exitosos = len([a for a in asignaciones if a["ESTADO"] == "✅"])
             total = len(asignaciones)
-            
-            reporte = f"""
-📊 REPORTE DE ASIGNACIÓN
-{'='*50}
-
-🎯 Resumen:
-   Total horarios: {total}
-   Asignados: {exitosos} ({exitosos*100/total:.1f}%)
-   Sin monitor: {len(sin_monitor)} ({len(sin_monitor)*100/total:.1f}%)
-
-👥 Monitores:
-"""
-            
-            for m in sorted(monitores, key=lambda x: x["horas"], reverse=True):
-                if m["horas"] > 0:
-                    status = "✅"
-                    if m["horas"] < m["min"]:
-                        status = f"⚠️ <{m['min']}h"
-                    elif m["horas"] > m["max"]:
-                        status = f"❌ >{m['max']}h"
-                    
-                    reporte += f"\n   {m['nombre'][:30]:30} | {m['horas']:2}h {status}"
-            
+            modo_titulo = "CON PRIORIDAD" if CONFIG["asignacion"]["usar_prioridad"] else "SIN PRIORIDAD"
+            reporte = f"📊 REPORTE DE ASIGNACIÓN {modo_titulo}\n{'='*60}\n"
+            reporte += f"\n🎯 Resumen:\n   Total horarios: {total}\n"
+            reporte += f"   Asignados: {exitosos} ({exitosos*100/total:.1f}%)\n"
+            reporte += f"   Sin monitor: {len(sin_monitor)} ({len(sin_monitor)*100/total:.1f}%)\n"
             self.progress.emit("✅ Asignación completada")
             self.finished.emit(df_result, monitores, reporte)
-            
         except Exception as e:
             self.error.emit(str(e))
 
 
-# ========================================================
-# VENTANA PRINCIPAL
-# ========================================================
+class DownloadDialog(QDialog):
+    def __init__(self, df_resultado, monitores_asignados, parent=None):
+        super().__init__(parent)
+        self.df_resultado = df_resultado
+        self.monitores_asignados = monitores_asignados
+        self.archivo_guardado = None
+        self.setWindowTitle("Asignación Completada")
+        self.setMinimumSize(500, 350)
+        self.setModal(True)
+        self.setStyleSheet("""
+            QDialog {background: white; border-radius: 16px;}
+            QLabel {color: #1F2937; background: transparent;}
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #667EEA, stop:1 #564FEE);
+                color: white; border: none; padding: 12px 24px; border-radius: 10px;
+                font-weight: 600; font-size: 13px; min-height: 40px;
+            }
+            QPushButton:hover {background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #7C8FF5, stop:1 #6B64F8);}
+            QPushButton#btnSecondary {background: #F3F4F6; color: #374151;}
+            QPushButton#btnSecondary:hover {background: #E5E7EB;}
+        """)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(32, 32, 32, 32)
+        layout.setSpacing(20)
+        icon = QLabel("✅")
+        icon.setFont(QFont("Inter", 64))
+        icon.setAlignment(Qt.AlignCenter)
+        icon.setStyleSheet("color: #10B981;")
+        layout.addWidget(icon)
+        title = QLabel("¡Asignación Completada!")
+        title.setFont(QFont("Inter", 20, QFont.Bold))
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+        exitosos = len([a for a in df_resultado.to_dict('records') if a.get("ESTADO") == "✅"])
+        total = len(df_resultado)
+        porcentaje = f"{exitosos*100/total:.1f}%" if total > 0 else "0%"
+        stats_frame = QFrame()
+        stats_frame.setStyleSheet("QFrame {background: #F9FAFB; border-radius: 12px; padding: 16px;}")
+        stats_layout = QVBoxLayout(stats_frame)
+        stats_text = f"<div style='text-align: center;'><p style='font-size: 14px; color: #6B7280;'>Se asignaron correctamente</p><p style='font-size: 32px; font-weight: bold; color: #667EEA;'>{exitosos}/{total}</p><p style='font-size: 14px; color: #6B7280;'>horarios ({porcentaje})</p></div>"
+        stats_label = QLabel(stats_text)
+        stats_label.setAlignment(Qt.AlignCenter)
+        stats_layout.addWidget(stats_label)
+        layout.addWidget(stats_frame)
+        message = QLabel("¿Deseas descargar el archivo de resultados ahora?")
+        message.setFont(QFont("Inter", 13))
+        message.setAlignment(Qt.AlignCenter)
+        message.setStyleSheet("color: #6B7280;")
+        layout.addWidget(message)
+        buttons_layout = QHBoxLayout()
+        buttons_layout.setSpacing(12)
+        self.btn_descargar = QPushButton("💾 Descargar Ahora")
+        self.btn_descargar.clicked.connect(self.descargar)
+        self.btn_despues = QPushButton("Descargar Después")
+        self.btn_despues.setObjectName("btnSecondary")
+        self.btn_despues.clicked.connect(self.reject)
+        buttons_layout.addWidget(self.btn_despues)
+        buttons_layout.addWidget(self.btn_descargar)
+        layout.addLayout(buttons_layout)
+    
+    def descargar(self):
+        ruta, _ = QFileDialog.getSaveFileName(self, "Guardar archivo de resultados", "Asignacion_Monitores.xlsx", "Archivos Excel (*.xlsx)")
+        if ruta:
+            try:
+                df_mon = pd.DataFrame([{
+                    'Monitor': m['nombre'], 'Prioridad': m['prioridad'], 'Horas': m['horas'],
+                    'Min': m['min'], 'Max': m['max'], 'Horarios': len(m['asignaciones']),
+                    'Estado': '✅' if m['min'] <= m['horas'] <= m['max'] else '⚠️'
+                } for m in self.monitores_asignados]).sort_values('Horas', ascending=False)
+                with pd.ExcelWriter(ruta, engine='openpyxl') as writer:
+                    self.df_resultado.to_excel(writer, sheet_name='Asignaciones', index=False)
+                    df_mon.to_excel(writer, sheet_name='Resumen Monitores', index=False)
+                self.archivo_guardado = ruta
+                success_msg = QMessageBox(self)
+                success_msg.setIcon(QMessageBox.Information)
+                success_msg.setWindowTitle("Descarga Exitosa")
+                success_msg.setText("✅ Archivo guardado exitosamente")
+                success_msg.setInformativeText(f"📁 {ruta}")
+                success_msg.exec()
+                self.accept()
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Error al guardar el archivo:\n{str(e)}")
+
+
+class ModernCard(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("ModernCard {background: white; border-radius: 16px; border: 1px solid #E5E7EB;}")
+
+
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
-
-        self.setWindowTitle("Gestor de Monitores – Sistema Completo")
-        self.setMinimumSize(1100, 700)
-
+        self.setWindowTitle("Sistema de Asignación de Monitores")
+        self.setMinimumSize(1400, 900)
         self.setStyleSheet("""
             QWidget {
-                background-color: #F4F6F9;
-                font-family: 'Segoe UI';
-                font-size: 14px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #F0F4F8, stop:1 #E5E9F0);
+                font-family: 'Inter', 'Segoe UI', sans-serif;
             }
             QPushButton {
-                background-color: #0078D4;
-                color: white;
-                padding: 12px;
-                border-radius: 8px;
-                font-weight: bold;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #667EEA, stop:1 #564FEE);
+                color: white; border: none; padding: 12px 24px; border-radius: 10px;
+                font-weight: 600; font-size: 13px; min-height: 40px;
             }
-            QPushButton:hover {
-                background-color: #005A9E;
-            }
-            QPushButton:disabled {
-                background-color: #CCCCCC;
-                color: #666666;
-            }
-            QTableView {
-                background: white;
-                border-radius: 8px;
-                border: 1px solid #DDD;
-            }
-            QTextEdit {
-                background: white;
-                border-radius: 8px;
-                border: 1px solid #DDD;
-                padding: 10px;
-                font-family: 'Consolas', monospace;
-                font-size: 12px;
-            }
-            QLabel {
-                color: #333;
-            }
+            QPushButton:hover {background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #7C8FF5, stop:1 #6B64F8);}
+            QPushButton:disabled {background: #D1D5DB; color: #9CA3AF;}
         """)
 
-        layout = QVBoxLayout()
+        main_layout = QVBoxLayout()
+        main_layout.setSpacing(20)
+        main_layout.setContentsMargins(24, 24, 24, 24)
 
-        # Título
-        title = QLabel("🎯 Sistema de Asignación de Monitores")
-        title.setFont(QFont("Segoe UI", 22, QFont.Bold))
-        title.setAlignment(Qt.AlignCenter)
-        layout.addWidget(title)
+        # STATS CARDS (sin header antes)
+        stats_layout = QHBoxLayout()
+        stats_layout.setSpacing(16)
+        self.card_monitores = self.create_stat_card("👥", "Monitores", "0", "#8B5CF6")
+        self.card_espacios = self.create_stat_card("📅", "Horarios", "0", "#3B82F6")
+        self.card_asignados = self.create_stat_card("✅", "Asignados", "0%", "#10B981")
+        stats_layout.addWidget(self.card_monitores)
+        stats_layout.addWidget(self.card_espacios)
+        stats_layout.addWidget(self.card_asignados)
+        main_layout.addLayout(stats_layout)
 
-        # Subtítulo con instrucciones
-        subtitle = QLabel("1️⃣ Carga Monitores → 2️⃣ Carga Espacios → 3️⃣ Asignar → 4️⃣ Exportar")
-        subtitle.setFont(QFont("Segoe UI", 11))
-        subtitle.setAlignment(Qt.AlignCenter)
-        subtitle.setStyleSheet("color: #666; margin-bottom: 10px;")
-        layout.addWidget(subtitle)
+        # ===== ROADMAP TIPO CAMINO =====
+        roadmap_card = ModernCard()
+        roadmap_layout = QVBoxLayout(roadmap_card)
+        roadmap_layout.setContentsMargins(20, 16, 20, 16)
+        roadmap_layout.setSpacing(12)
+        
+        header_roadmap = QHBoxLayout()
+        roadmap_title = QLabel("🗺️ Proceso de Asignación")
+        roadmap_title.setFont(QFont("Inter", 13, QFont.Bold))
+        roadmap_title.setStyleSheet("color: #111827; background: transparent;")
+        header_roadmap.addWidget(roadmap_title)
+        header_roadmap.addStretch()
+        
+        self.btn_config = QPushButton("⚙️")
+        self.btn_config.setFixedSize(50, 50)
+        self.btn_config.setToolTip("Configuración del sistema")
+        self.btn_config.clicked.connect(self.toggle_config_panel)
+        self.btn_config.setStyleSheet("""
+            QPushButton {background: #F3F4F6; color: #374151; font-size: 22px; padding: 2px; border-radius: 10px;}
+            QPushButton:hover {background: #E5E7EB;}
+        """)
+        header_roadmap.addWidget(self.btn_config)
+        roadmap_layout.addLayout(header_roadmap)
+        
+        # Roadmap horizontal tipo camino
+        steps_container = QHBoxLayout()
+        steps_container.setSpacing(0)
+        steps_container.setContentsMargins(0, 0, 0, 0)
+        
+        # Paso 1
+        self.step1_frame = self.create_path_step("1", "Cargar Monitores", "👥", "pending")
+        self.step1_frame.mousePressEvent = lambda e: self.cargar_monitores()
+        self.step1_frame.setCursor(Qt.PointingHandCursor)
+        steps_container.addWidget(self.step1_frame)
+        
+        # Conector 1
+        self.connector1 = self.create_path_connector("pending")
+        steps_container.addWidget(self.connector1)
+        
+        # Paso 2
+        self.step2_frame = self.create_path_step("2", "Cargar Espacios", "📅", "pending")
+        self.step2_frame.mousePressEvent = lambda e: self.cargar_espacios()
+        self.step2_frame.setCursor(Qt.PointingHandCursor)
+        steps_container.addWidget(self.step2_frame)
+        
+        # Conector 2
+        self.connector2 = self.create_path_connector("pending")
+        steps_container.addWidget(self.connector2)
+        
+        # Paso 3
+        self.step3_frame = self.create_path_step("3", "Asignar Monitores", "⚡", "pending")
+        self.step3_frame.mousePressEvent = lambda e: self.iniciar_asignacion() if self.step1_frame.status == "success" and self.step2_frame.status == "success" else None
+        self.step3_frame.setCursor(Qt.PointingHandCursor)
+        steps_container.addWidget(self.step3_frame)
+        
+        # Conector 3
+        self.connector3 = self.create_path_connector("pending")
+        steps_container.addWidget(self.connector3)
+        
+        # Paso 4
+        self.step4_frame = self.create_path_step("4", "Exportar Resultados", "💾", "pending")
+        self.step4_frame.mousePressEvent = lambda e: self.exportar() if not self.df_resultado.empty else None
+        self.step4_frame.setCursor(Qt.PointingHandCursor)
+        steps_container.addWidget(self.step4_frame)
+        
+        roadmap_layout.addLayout(steps_container)
+        main_layout.addWidget(roadmap_card)
 
-        # Botones superiores
-        btn_layout = QHBoxLayout()
+        # CONFIG OVERLAY
+        self.config_overlay = QFrame(self)
+        self.config_overlay.setVisible(False)
+        self.config_overlay.setStyleSheet("QFrame {background: rgba(0, 0, 0, 0.5);}")
+        self.config_overlay.mousePressEvent = lambda e: self.toggle_config_panel()
+        overlay_layout = QVBoxLayout(self.config_overlay)
+        overlay_layout.setContentsMargins(0, 0, 0, 0)
+        overlay_layout.setAlignment(Qt.AlignCenter)
+        
+        self.config_card = ModernCard()
+        self.config_card.setMaximumWidth(900)
+        self.config_card.setMaximumHeight(280)
+        self.config_card.mousePressEvent = lambda e: e.accept()
+        config_layout = QVBoxLayout(self.config_card)
+        config_layout.setContentsMargins(32, 24, 32, 24)
+        config_layout.setSpacing(20)
+        
+        config_header = QHBoxLayout()
+        config_icon = QLabel("⚙️")
+        config_icon.setFont(QFont("Inter", 20))
+        config_icon.setStyleSheet("background: transparent;")
+        config_header.addWidget(config_icon)
+        config_title = QLabel("Configuración del Sistema")
+        config_title.setFont(QFont("Inter", 16, QFont.Bold))
+        config_title.setStyleSheet("color: #111827; background: transparent;")
+        config_header.addWidget(config_title)
+        config_header.addStretch()
+        btn_close = QPushButton("✕ Cerrar")
+        btn_close.setFixedHeight(36)
+        btn_close.clicked.connect(self.toggle_config_panel)
+        btn_close.setStyleSheet("QPushButton {background: #F3F4F6; color: #6B7280; padding: 0px 16px; border-radius: 8px;} QPushButton:hover {background: #E5E7EB;}")
+        config_header.addWidget(btn_close)
+        config_layout.addLayout(config_header)
+        
+        options_layout = QHBoxLayout()
+        options_layout.setSpacing(16)
+        
+        self.chk_usar_prioridad = QCheckBox("🎖️  Usar prioridades")
+        self.chk_usar_prioridad.setChecked(True)
+        self.chk_usar_prioridad.stateChanged.connect(self.toggle_prioridad)
+        self.chk_balancear = QCheckBox("⚖️  Balancear carga")
+        self.chk_balancear.setChecked(True)
+        self.chk_priorizar_min = QCheckBox("🎯  Priorizar mínimo")
+        self.chk_priorizar_min.setChecked(True)
+        options_layout.addWidget(self.chk_usar_prioridad)
+        options_layout.addWidget(self.chk_balancear)
+        options_layout.addWidget(self.chk_priorizar_min)
+        config_layout.addLayout(options_layout)
+        overlay_layout.addWidget(self.config_card)
 
-        self.btn_monitores = QPushButton("📁 Cargar Monitores")
-        self.btn_espacios = QPushButton("📁 Cargar Espacios")
-        self.btn_asignar = QPushButton("⚡ Asignar Automáticamente")
-        self.btn_exportar = QPushButton("💾 Exportar Resultados")
-
-        self.btn_asignar.setEnabled(False)
-        self.btn_exportar.setEnabled(False)
-
-        btn_layout.addWidget(self.btn_monitores)
-        btn_layout.addWidget(self.btn_espacios)
-        btn_layout.addWidget(self.btn_asignar)
-        btn_layout.addWidget(self.btn_exportar)
-
-        layout.addLayout(btn_layout)
-
-        # Barra de progreso
+        # PROGRESS BAR
         self.progress = QProgressBar()
         self.progress.setVisible(False)
-        self.progress.setStyleSheet("""
-            QProgressBar {
-                border: 2px solid #DDD;
-                border-radius: 5px;
-                text-align: center;
-                height: 25px;
-            }
-            QProgressBar::chunk {
-                background-color: #0078D4;
-            }
-        """)
-        layout.addWidget(self.progress)
+        self.progress.setTextVisible(False)
+        self.progress.setMaximumHeight(6)
+        main_layout.addWidget(self.progress)
 
-        # Etiqueta de estado
+        # STATUS
         self.lbl_estado = QLabel("📋 Esperando archivos...")
-        self.lbl_estado.setFont(QFont("Segoe UI", 10))
-        self.lbl_estado.setStyleSheet("color: #666; padding: 5px;")
-        layout.addWidget(self.lbl_estado)
+        self.lbl_estado.setFont(QFont("Inter", 12))
+        self.lbl_estado.setStyleSheet("color: #6B7280; background: white; padding: 10px 16px; border-radius: 8px; border: 1px solid #E5E7EB;")
+        main_layout.addWidget(self.lbl_estado)
 
-        # Tabla de resultados
-        self.table = QTableView()
-        layout.addWidget(self.table, stretch=3)
-
-        # Área de texto para reporte
+        # CONTENT AREA CON PESTAÑAS
+        content_layout = QHBoxLayout()
+        content_layout.setSpacing(12)
+        table_card = ModernCard()
+        table_layout = QVBoxLayout(table_card)
+        table_layout.setContentsMargins(0, 0, 0, 0)
+        table_header = QLabel("📊 Visualización de Datos")
+        table_header.setFont(QFont("Inter", 13, QFont.Bold))
+        table_header.setStyleSheet("color: #1F2937; padding: 14px 16px; background: #F9FAFB; border-radius: 12px 12px 0 0;")
+        table_layout.addWidget(table_header)
+        
+        self.tabs = QTabWidget()
+        self.table_monitores = QTableView()
+        self.table_espacios = QTableView()
+        self.table_asignaciones = QTableView()
+        self.table_resumen = QTableView()
+        self.tabs.addTab(self.table_monitores, "👥  Monitores")
+        self.tabs.addTab(self.table_espacios, "📅  Horarios")
+        self.tabs.addTab(self.table_asignaciones, "✅  Asignaciones")
+        self.tabs.addTab(self.table_resumen, "📈  Resumen")
+        table_layout.addWidget(self.tabs)
+        content_layout.addWidget(table_card, stretch=6)
+        
+        report_card = ModernCard()
+        report_layout = QVBoxLayout(report_card)
+        report_layout.setContentsMargins(0, 0, 0, 0)
+        report_header = QLabel("📝 Reporte")
+        report_header.setFont(QFont("Inter", 13, QFont.Bold))
+        report_header.setStyleSheet("color: #1F2937; padding: 14px 16px; background: #F9FAFB; border-radius: 12px 12px 0 0;")
+        report_layout.addWidget(report_header)
         self.text_reporte = QTextEdit()
         self.text_reporte.setReadOnly(True)
-        self.text_reporte.setPlaceholderText("El reporte de asignación aparecerá aquí...")
-        layout.addWidget(self.text_reporte, stretch=2)
+        self.text_reporte.setPlaceholderText("El reporte detallado aparecerá aquí...")
+        report_layout.addWidget(self.text_reporte)
+        content_layout.addWidget(report_card, stretch=4)
+        main_layout.addLayout(content_layout, stretch=1)
+        self.setLayout(main_layout)
 
-        self.setLayout(layout)
-
-        # Conectar funciones
-        self.btn_monitores.clicked.connect(self.cargar_monitores)
-        self.btn_espacios.clicked.connect(self.cargar_espacios)
-        self.btn_asignar.clicked.connect(self.iniciar_asignacion)
-        self.btn_exportar.clicked.connect(self.exportar)
-
-        # Variables de datos
         self.monitores = []
         self.df_espacios = pd.DataFrame()
         self.df_resultado = pd.DataFrame()
         self.monitores_asignados = []
 
-    def cargar_monitores(self):
-        ruta, _ = QFileDialog.getOpenFileName(
-            self, "Seleccionar archivo de monitores", "", 
-            "Archivos Excel (*.xlsx *.xls)"
-        )
+    def create_path_step(self, number, title, icon, status="pending"):
+        """Crea un paso del roadmap tipo rectángulo de camino HORIZONTAL"""
+        frame = QFrame()
+        frame.setMinimumHeight(90)
+        frame.setMaximumHeight(90)
+        frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         
+        if status == "pending":
+            bg_gradient = "stop:0 #F9FAFB, stop:1 #F3F4F6"
+            border_color = "#E5E7EB"
+            text_color = "#9CA3AF"
+            number_bg = "#E5E7EB"
+            number_color = "#6B7280"
+        elif status == "success":
+            bg_gradient = "stop:0 #D1FAE5, stop:1 #A7F3D0"
+            border_color = "#10B981"
+            text_color = "#065F46"
+            number_bg = "#10B981"
+            number_color = "white"
+        else:
+            bg_gradient = "stop:0 #FEE2E2, stop:1 #FECACA"
+            border_color = "#EF4444"
+            text_color = "#991B1B"
+            number_bg = "#EF4444"
+            number_color = "white"
+        
+        frame.setStyleSheet(f"""
+            QFrame {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, {bg_gradient});
+                border: 2px solid {border_color};
+                border-radius: 12px;
+            }}
+        """)
+        
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+        layout.setAlignment(Qt.AlignCenter)
+        
+        number_label = QLabel(number)
+        number_label.setAlignment(Qt.AlignCenter)
+        number_label.setFixedSize(36, 36)
+        number_label.setFont(QFont("Inter", 16, QFont.Bold))
+        number_label.setStyleSheet(f"QLabel {{background: {number_bg}; color: {number_color}; border-radius: 18px; border: none;}}")
+        layout.addWidget(number_label)
+        
+        icon_label = QLabel(icon)
+        icon_label.setFont(QFont("Inter", 32))
+        icon_label.setAlignment(Qt.AlignCenter)
+        icon_label.setStyleSheet(f"color: {text_color}; background: transparent; border: none;")
+        layout.addWidget(icon_label)
+        
+        title_label = QLabel(title)
+        title_label.setFont(QFont("Inter", 12, QFont.Bold))
+        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setWordWrap(True)
+        title_label.setStyleSheet(f"color: {text_color}; background: transparent; border: none;")
+        layout.addWidget(title_label)
+        
+        frame.number_label = number_label
+        frame.icon_label = icon_label
+        frame.title_label = title_label
+        frame.status = status
+        return frame
+    
+    def create_path_connector(self, status="pending"):
+        """Crea un conector tipo camino entre pasos"""
+        connector = QFrame()
+        connector.setFixedSize(40, 90)
+        connector.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        
+        if status == "pending":
+            bg_color = "#E5E7EB"
+        elif status == "success":
+            bg_color = "#10B981"
+        else:
+            bg_color = "#EF4444"
+        
+        connector.setStyleSheet(f"""
+            QFrame {{
+                background: {bg_color};
+                border: none;
+            }}
+        """)
+        connector.status = status
+        return connector
+    
+    def update_step_status(self, step_frame, status):
+        """Actualiza el estado visual de un paso"""
+        if status == "pending":
+            bg_gradient = "stop:0 #F9FAFB, stop:1 #F3F4F6"
+            border_color = "#E5E7EB"
+            text_color = "#9CA3AF"
+            number_bg = "#E5E7EB"
+            number_color = "#6B7280"
+        elif status == "success":
+            bg_gradient = "stop:0 #D1FAE5, stop:1 #A7F3D0"
+            border_color = "#10B981"
+            text_color = "#065F46"
+            number_bg = "#10B981"
+            number_color = "white"
+        else:
+            bg_gradient = "stop:0 #FEE2E2, stop:1 #FECACA"
+            border_color = "#EF4444"
+            text_color = "#991B1B"
+            number_bg = "#EF4444"
+            number_color = "white"
+        
+        step_frame.setStyleSheet(f"""
+            QFrame {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, {bg_gradient});
+                border: 2px solid {border_color};
+                border-radius: 12px;
+            }}
+        """)
+        step_frame.number_label.setStyleSheet(f"QLabel {{background: {number_bg}; color: {number_color}; border-radius: 14px;}}")
+        step_frame.icon_label.setStyleSheet(f"color: {text_color}; background: transparent;")
+        step_frame.title_label.setStyleSheet(f"color: {text_color}; background: transparent;")
+        step_frame.status = status
+        self.update_connectors()
+    
+    def update_connectors(self):
+        """Actualiza el color de los conectores según el progreso"""
+        if hasattr(self, 'step1_frame') and self.step1_frame.status == "success":
+            self.connector1.setStyleSheet("QFrame {background: #10B981;}")
+        else:
+            self.connector1.setStyleSheet("QFrame {background: #E5E7EB;}")
+        
+        if hasattr(self, 'step2_frame') and self.step2_frame.status == "success":
+            self.connector2.setStyleSheet("QFrame {background: #10B981;}")
+        else:
+            self.connector2.setStyleSheet("QFrame {background: #E5E7EB;}")
+        
+        if hasattr(self, 'step3_frame') and self.step3_frame.status == "success":
+            self.connector3.setStyleSheet("QFrame {background: #10B981;}")
+        else:
+            self.connector3.setStyleSheet("QFrame {background: #E5E7EB;}")
+
+    def create_stat_card(self, icon, title, value, color):
+        card = QFrame()
+        card.setStyleSheet(f"QFrame {{background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {color}, stop:1 {self.darken_color(color)}); border-radius: 14px;}}")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(18, 14, 18, 14)
+        header_layout = QHBoxLayout()
+        icon_label = QLabel(icon)
+        icon_label.setFont(QFont("Inter", 18))
+        icon_label.setStyleSheet("color: white; background: transparent;")
+        header_layout.addWidget(icon_label)
+        title_label = QLabel(title.upper())
+        title_label.setFont(QFont("Inter", 9, QFont.Bold))
+        title_label.setStyleSheet("color: rgba(255, 255, 255, 0.9); background: transparent;")
+        header_layout.addWidget(title_label)
+        header_layout.addStretch()
+        layout.addLayout(header_layout)
+        value_label = QLabel(value)
+        value_label.setFont(QFont("Inter", 24, QFont.Bold))
+        value_label.setStyleSheet("color: white; background: transparent;")
+        layout.addWidget(value_label)
+        card.value_label = value_label
+        return card
+    
+    def darken_color(self, hex_color):
+        hex_color = hex_color.lstrip('#')
+        r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+        factor = 0.8
+        r, g, b = int(r * factor), int(g * factor), int(b * factor)
+        return f'#{r:02x}{g:02x}{b:02x}'
+
+    def cargar_monitores(self):
+        ruta, _ = QFileDialog.getOpenFileName(self, "Seleccionar archivo de monitores", "", "Archivos Excel (*.xlsx *.xls)")
         if ruta:
             try:
                 self.monitores = cargar_monitores_desde_excel(ruta)
-                
-                df_preview = pd.DataFrame([{
-                    'Nombre': m['nombre'],
-                    'Min': m['min'],
-                    'Max': m['max']
-                } for m in self.monitores])
-                
-                self.table.setModel(PandasModel(df_preview))
-                self.lbl_estado.setText(f"✅ {len(self.monitores)} monitores cargados")
+                df_preview = pd.DataFrame([{'Nombre': m['nombre'], 'Prioridad': f"⭐{m['prioridad']}", 'Min': m['min'], 'Max': m['max']} for m in self.monitores])
+                self.table_monitores.setModel(PandasModel(df_preview))
+                self.tabs.setCurrentIndex(0)
+                self.card_monitores.value_label.setText(str(len(self.monitores)))
+                self.lbl_estado.setText(f"✅ {len(self.monitores)} monitores cargados exitosamente")
                 self.text_reporte.setPlainText(f"📂 Monitores cargados: {len(self.monitores)}")
-                
                 self.verificar_listo()
-                
+                self.update_step_status(self.step1_frame, "success")
             except Exception as e:
+                self.update_step_status(self.step1_frame, "error")
                 QMessageBox.critical(self, "Error", f"Error al cargar monitores:\n{str(e)}")
 
     def cargar_espacios(self):
-        ruta, _ = QFileDialog.getOpenFileName(
-            self, "Seleccionar archivo de espacios", "", 
-            "Archivos Excel (*.xlsx *.xls)"
-        )
-        
+        ruta, _ = QFileDialog.getOpenFileName(self, "Seleccionar archivo de espacios", "", "Archivos Excel (*.xlsx *.xls)")
         if ruta:
             try:
                 self.df_espacios = cargar_espacios_desde_excel(ruta)
-                
-                self.table.setModel(PandasModel(self.df_espacios.head(50)))
-                self.lbl_estado.setText(f"✅ {len(self.df_espacios)} horarios cargados")
-                self.text_reporte.setPlainText(
-                    f"📂 Espacios cargados: {len(self.df_espacios)} horarios\n"
-                    f"🏢 Salas: {self.df_espacios['SALA'].nunique()}\n"
-                    f"⏱️  Total horas: {self.df_espacios['DURACION'].sum()}"
-                )
-                
+                self.table_espacios.setModel(PandasModel(self.df_espacios.head(100)))
+                self.tabs.setCurrentIndex(1)
+                self.card_espacios.value_label.setText(str(len(self.df_espacios)))
+                self.lbl_estado.setText(f"✅ {len(self.df_espacios)} horarios cargados exitosamente")
                 self.verificar_listo()
-                
+                self.update_step_status(self.step2_frame, "success")
             except Exception as e:
+                self.update_step_status(self.step2_frame, "error")
                 QMessageBox.critical(self, "Error", f"Error al cargar espacios:\n{str(e)}")
 
     def verificar_listo(self):
         if len(self.monitores) > 0 and len(self.df_espacios) > 0:
-            self.btn_asignar.setEnabled(True)
-            self.lbl_estado.setText("✅ Listo para asignar")
+            self.lbl_estado.setText("✅ Todo listo! Haz click en 'Asignar' para comenzar")
 
     def iniciar_asignacion(self):
-        self.btn_asignar.setEnabled(False)
         self.progress.setVisible(True)
-        self.progress.setRange(0, 0)  # Indeterminado
-        
-        # Crear copia de monitores para el thread
+        self.progress.setRange(0, 0)
+        CONFIG["asignacion"]["usar_prioridad"] = self.chk_usar_prioridad.isChecked()
+        CONFIG["asignacion"]["balancear_carga"] = self.chk_balancear.isChecked()
+        CONFIG["asignacion"]["priorizar_minimo"] = self.chk_priorizar_min.isChecked()
         import copy
         monitores_copy = copy.deepcopy(self.monitores)
-        
         self.thread = AsignacionThread(monitores_copy, self.df_espacios)
         self.thread.finished.connect(self.asignacion_completada)
         self.thread.error.connect(self.asignacion_error)
         self.thread.progress.connect(self.actualizar_progreso)
         self.thread.start()
+    
+    def toggle_prioridad(self, state):
+        if state == Qt.Checked:
+            self.lbl_estado.setText("✅ Sistema de prioridades ACTIVADO")
+        else:
+            self.lbl_estado.setText("⚠️ Sistema de prioridades DESACTIVADO")
+
+    def toggle_config_panel(self):
+        if self.config_overlay.isVisible():
+            self.config_overlay.setVisible(False)
+        else:
+            self.config_overlay.setVisible(True)
+            self.config_overlay.raise_()
 
     def actualizar_progreso(self, mensaje):
         self.lbl_estado.setText(mensaje)
@@ -632,26 +862,30 @@ class MainWindow(QWidget):
     def asignacion_completada(self, df_resultado, monitores, reporte):
         self.df_resultado = df_resultado
         self.monitores_asignados = monitores
-        
-        self.table.setModel(PandasModel(df_resultado))
+        self.table_asignaciones.setModel(PandasModel(df_resultado))
+        self.tabs.setCurrentIndex(2)
+        df_mon = pd.DataFrame([{'Monitor': m['nombre'], 'Prioridad': m['prioridad'], 'Horas': m['horas'], 'Min': m['min'], 'Max': m['max'], 'Horarios': len(m['asignaciones']), 'Estado': '✅' if m['min'] <= m['horas'] <= m['max'] else '⚠️'} for m in monitores if m['horas'] > 0]).sort_values('Horas', ascending=False)
+        self.table_resumen.setModel(PandasModel(df_mon))
         self.text_reporte.setPlainText(reporte)
-        
+        exitosos = len([a for a in df_resultado.to_dict('records') if a.get("ESTADO") == "✅"])
+        total = len(df_resultado)
+        porcentaje = f"{exitosos*100/total:.0f}%" if total > 0 else "0%"
+        self.card_asignados.value_label.setText(f"{exitosos}/{total}")
         self.progress.setVisible(False)
-        self.btn_asignar.setEnabled(True)
-        self.btn_exportar.setEnabled(True)
-        
-        self.lbl_estado.setText("✅ Asignación completada exitosamente")
-        
-        QMessageBox.information(
-            self, 
-            "Completado", 
-            "✅ Asignación completada\n\nRevisa los resultados en la tabla y el reporte."
-        )
+        self.lbl_estado.setText(f"✅ Asignación completada exitosamente!")
+        if exitosos > 0:
+            self.update_step_status(self.step3_frame, "success")
+        else:
+            self.update_step_status(self.step3_frame, "error")
+        dialog = DownloadDialog(df_resultado, monitores, self)
+        resultado = dialog.exec()
+        if resultado == QDialog.Accepted and dialog.archivo_guardado:
+            self.lbl_estado.setText(f"✅ Archivo exportado: {dialog.archivo_guardado}")
+            self.update_step_status(self.step4_frame, "success")
 
     def asignacion_error(self, error):
         self.progress.setVisible(False)
-        self.btn_asignar.setEnabled(True)
-        
+        self.update_step_status(self.step3_frame, "error")
         QMessageBox.critical(self, "Error", f"Error en la asignación:\n{error}")
         self.lbl_estado.setText("❌ Error en la asignación")
 
@@ -659,39 +893,32 @@ class MainWindow(QWidget):
         if self.df_resultado.empty:
             QMessageBox.warning(self, "Advertencia", "No hay resultados para exportar")
             return
-        
-        ruta, _ = QFileDialog.getSaveFileName(
-            self, "Guardar archivo", "Asignacion_Monitores.xlsx",
-            "Archivos Excel (*.xlsx)"
-        )
-        
+        ruta, _ = QFileDialog.getSaveFileName(self, "Guardar archivo", "Asignacion_Monitores.xlsx", "Archivos Excel (*.xlsx)")
         if ruta:
             try:
-                df_mon = pd.DataFrame([{
-                    'Monitor': m['nombre'],
-                    'Horas': m['horas'],
-                    'Min': m['min'],
-                    'Max': m['max'],
-                    'Horarios': len(m['asignaciones']),
-                    'Estado': '✅' if m['min'] <= m['horas'] <= m['max'] else '⚠️'
-                } for m in self.monitores_asignados]).sort_values('Horas', ascending=False)
-                
+                df_mon = pd.DataFrame([{'Monitor': m['nombre'], 'Prioridad': m['prioridad'], 'Horas': m['horas'], 'Min': m['min'], 'Max': m['max'], 'Horarios': len(m['asignaciones']), 'Estado': '✅' if m['min'] <= m['horas'] <= m['max'] else '⚠️'} for m in self.monitores_asignados]).sort_values('Horas', ascending=False)
                 with pd.ExcelWriter(ruta, engine='openpyxl') as writer:
                     self.df_resultado.to_excel(writer, sheet_name='Asignaciones', index=False)
                     df_mon.to_excel(writer, sheet_name='Resumen Monitores', index=False)
-                
-                QMessageBox.information(self, "Exportado", f"✅ Archivo guardado:\n{ruta}")
+                QMessageBox.information(self, "Exportado", f"✅ Archivo guardado exitosamente:\n{ruta}")
                 self.lbl_estado.setText(f"✅ Exportado: {ruta}")
-                
+                self.update_step_status(self.step4_frame, "success")
             except Exception as e:
+                self.update_step_status(self.step4_frame, "error")
                 QMessageBox.critical(self, "Error", f"Error al exportar:\n{str(e)}")
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, 'config_overlay'):
+            self.config_overlay.setGeometry(0, 0, self.width(), self.height())
 
-# ========================================================
-# EJECUTAR APLICACIÓN
-# ========================================================
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    font = QFont("Inter")
+    if not font.exactMatch():
+        font = QFont("Segoe UI")
+    app.setFont(font)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
