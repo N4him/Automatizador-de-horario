@@ -4,7 +4,7 @@ import re
 from PySide6.QtWidgets import (
     QApplication, QWidget, QPushButton, QVBoxLayout, 
     QHBoxLayout, QTableView, QFileDialog, QLabel, QMessageBox,
-    QProgressBar, QTextEdit, QCheckBox, QFrame, QGridLayout, QDialog, QSizePolicy, QTabWidget
+    QProgressBar, QTextEdit, QCheckBox, QFrame, QDialog, QSizePolicy, QTabWidget
 )
 from PySide6.QtCore import Qt, QAbstractTableModel, QThread, Signal
 from PySide6.QtGui import QFont
@@ -43,7 +43,7 @@ CONFIG = {
 
 
 # ========================================================
-# FUNCIONES DE LÓGICA (mismas que antes)
+# FUNCIONES DE LÓGICA
 # ========================================================
 
 def parse_time_str(time_str):
@@ -115,8 +115,19 @@ def parse_prioridad(valor):
 
 
 def cargar_monitores_desde_excel(ruta):
+    """
+    Carga monitores desde Excel (.xlsx, .xls) o LibreOffice (.ods)
+    """
     cfg = CONFIG["monitores"]
-    df_raw = pd.read_excel(ruta, sheet_name=0, header=None)
+    
+    # Detectar tipo de archivo y leer apropiadamente
+    if ruta.endswith('.ods'):
+        # Usar engine específico para ODS
+        df_raw = pd.read_excel(ruta, sheet_name=0, header=None, engine='odf')
+    else:
+        # Usar engine por defecto para Excel
+        df_raw = pd.read_excel(ruta, sheet_name=0, header=None)
+    
     dias_row = df_raw.iloc[3]
     jornadas_row = df_raw.iloc[cfg["header_row"]]
     col_mapping = {}
@@ -174,9 +185,19 @@ def cargar_monitores_desde_excel(ruta):
     return monitores
 
 
+
 def cargar_espacios_desde_excel(ruta):
+    """
+    Carga espacios desde Excel (.xlsx, .xls) o LibreOffice (.ods)
+    """
     cfg = CONFIG["espacios"]
-    df = pd.read_excel(ruta, sheet_name=0)
+    
+    # Detectar tipo de archivo y leer apropiadamente
+    if ruta.endswith('.ods'):
+        df = pd.read_excel(ruta, sheet_name=0, engine='odf')
+    else:
+        df = pd.read_excel(ruta, sheet_name=0)
+    
     columnas_req = [cfg["col_sala"], cfg["col_dia"], cfg["col_hora_inicio"], 
                     cfg["col_hora_fin"], cfg["col_curso"]]
     faltantes = [col for col in columnas_req if col not in df.columns]
@@ -276,6 +297,266 @@ def asignar_monitores(monitores, df_espacios):
     return asignaciones, sin_monitor, monitores
 
 
+# ========================================================
+# FUNCIONES DE EXPORTACIÓN CON HORARIOS VISUALES
+# ========================================================
+
+def crear_horario_consolidado(writer, df_asig, salas, cfg_esp):
+    """Crea horario visual con todas las salas HORIZONTALMENTE"""
+    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+    
+    workbook = writer.book
+    worksheet = workbook.create_sheet('Horarios Salas', 0)
+    
+    # Estilos
+    color_naranja = PatternFill(start_color="FFA500", end_color="FFA500", fill_type="solid")
+    color_verde = PatternFill(start_color="90EE90", end_color="90EE90", fill_type="solid")
+    color_azul = PatternFill(start_color="87CEEB", end_color="87CEEB", fill_type="solid")
+    color_vacio = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
+    color_sin_monitor = PatternFill(start_color="FFB6C1", end_color="FFB6C1", fill_type="solid")
+    color_header = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
+    color_titulo_sala = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    
+    fuente_negra = Font(bold=False, size=8, color="000000")
+    fuente_header = Font(bold=True, size=9, color="000000")
+    fuente_titulo = Font(bold=True, size=11, color="FFFFFF")
+    
+    alineacion_centro = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    
+    borde = Border(
+        left=Side(style='thin', color='000000'),
+        right=Side(style='thin', color='000000'),
+        top=Side(style='thin', color='000000'),
+        bottom=Side(style='thin', color='000000')
+    )
+    
+    dias = ['Lunes', 'Martes', 'Miercoles', 'Jueves', 'Viernes', 'Sabado']
+    
+    hora_min = int(df_asig[cfg_esp["col_hora_inicio"]].min())
+    hora_max = int(df_asig[cfg_esp["col_hora_fin"]].max())
+    
+    columna_actual = 1
+    
+    # Fila 1: Títulos de salas
+    for sala in salas:
+        worksheet.merge_cells(
+            start_row=1, 
+            start_column=columna_actual, 
+            end_row=1, 
+            end_column=columna_actual + 6
+        )
+        cell_titulo = worksheet.cell(row=1, column=columna_actual)
+        cell_titulo.value = sala
+        cell_titulo.fill = color_titulo_sala
+        cell_titulo.font = fuente_titulo
+        cell_titulo.alignment = alineacion_centro
+        cell_titulo.border = borde
+        
+        # Fila 2: Encabezados de días
+        cell_hora_header = worksheet.cell(row=2, column=columna_actual)
+        cell_hora_header.value = "Hora"
+        cell_hora_header.fill = color_header
+        cell_hora_header.font = fuente_header
+        cell_hora_header.alignment = alineacion_centro
+        cell_hora_header.border = borde
+        
+        for idx_dia, dia in enumerate(dias, start=1):
+            cell = worksheet.cell(row=2, column=columna_actual + idx_dia)
+            cell.value = dia
+            cell.fill = color_header
+            cell.font = fuente_header
+            cell.alignment = alineacion_centro
+            cell.border = borde
+        
+        columna_actual += 7
+    
+    # Filas 3+: Horas y datos
+    for fila_hora, hora in enumerate(range(hora_min, hora_max), start=3):
+        hora_str = f"{hora}:00-{hora+1}:00"
+        
+        columna_actual = 1
+        
+        for sala in salas:
+            df_sala = df_asig[df_asig[cfg_esp["col_sala"]] == sala]
+            
+            cell_hora = worksheet.cell(row=fila_hora, column=columna_actual)
+            cell_hora.value = hora_str
+            cell_hora.fill = color_header
+            cell_hora.font = fuente_header
+            cell_hora.alignment = alineacion_centro
+            cell_hora.border = borde
+            
+            for idx_dia, dia in enumerate(dias, start=1):
+                cell = worksheet.cell(row=fila_hora, column=columna_actual + idx_dia)
+                cell.border = borde
+                cell.alignment = alineacion_centro
+                
+                dia_norm = dia.lower()
+                asignaciones_celda = df_sala[
+                    (df_sala['DIA_NORM'] == dia_norm) &
+                    (df_sala[cfg_esp["col_hora_inicio"]] <= hora) &
+                    (df_sala[cfg_esp["col_hora_fin"]] > hora)
+                ]
+                
+                if len(asignaciones_celda) > 0:
+                    asig = asignaciones_celda.iloc[0]
+                    curso = asig[cfg_esp["col_curso"]]
+                    monitor = asig['MONITOR']
+                    
+                    if monitor == "SIN MONITOR":
+                        cell.value = f"{curso}\n❌ SIN MONITOR"
+                        cell.fill = color_sin_monitor
+                        cell.font = Font(size=7, color="FF0000", bold=True)
+                    else:
+                        nombre_corto = monitor.split()[0] if monitor else ""
+                        cell.value = f"{curso}\n{nombre_corto}"
+                        cell.font = fuente_negra
+                        
+                        hash_val = hash(monitor) % 3
+                        if hash_val == 0:
+                            cell.fill = color_naranja
+                        elif hash_val == 1:
+                            cell.fill = color_verde
+                        else:
+                            cell.fill = color_azul
+                else:
+                    cell.value = ""
+                    cell.fill = color_vacio
+            
+            columna_actual += 7
+    
+    # Ajustar anchos
+    for col_num in range(1, columna_actual):
+        col_letter = get_column_letter(col_num)
+        if (col_num - 1) % 7 == 0:
+            worksheet.column_dimensions[col_letter].width = 11
+        else:
+            worksheet.column_dimensions[col_letter].width = 18
+    
+    worksheet.row_dimensions[1].height = 25
+    worksheet.row_dimensions[2].height = 20
+    for row in range(3, fila_hora + 1):
+        worksheet.row_dimensions[row].height = 35
+
+
+def crear_horario_monitores(writer, monitores, df_asig, cfg_esp):
+    """Crea horario detallado de cada monitor"""
+    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+    
+    workbook = writer.book
+    worksheet = workbook.create_sheet('Horarios Monitores', 1)
+    
+    color_monitor = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    color_header = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
+    color_clase = PatternFill(start_color="90EE90", end_color="90EE90", fill_type="solid")
+    color_vacio = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
+    
+    fuente_monitor = Font(bold=True, size=12, color="FFFFFF")
+    fuente_header = Font(bold=True, size=10, color="000000")
+    fuente_normal = Font(size=8, color="000000")
+    
+    alineacion_centro = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    
+    borde = Border(
+        left=Side(style='thin', color='000000'),
+        right=Side(style='thin', color='000000'),
+        top=Side(style='thin', color='000000'),
+        bottom=Side(style='thin', color='000000')
+    )
+    
+    dias = ['Lunes', 'Martes', 'Miercoles', 'Jueves', 'Viernes', 'Sabado']
+    
+    hora_min = int(df_asig[cfg_esp["col_hora_inicio"]].min())
+    hora_max = int(df_asig[cfg_esp["col_hora_fin"]].max())
+    
+    fila_actual = 1
+    
+    monitores_activos = [m for m in monitores if m["horas"] > 0]
+    monitores_activos.sort(key=lambda x: x["nombre"])
+    
+    for monitor in monitores_activos:
+        # Título del monitor
+        worksheet.merge_cells(start_row=fila_actual, start_column=1, 
+                             end_row=fila_actual, end_column=7)
+        cell_titulo = worksheet.cell(row=fila_actual, column=1)
+        cell_titulo.value = f"{monitor['nombre']} - {monitor['horas']} horas"
+        cell_titulo.fill = color_monitor
+        cell_titulo.font = fuente_monitor
+        cell_titulo.alignment = alineacion_centro
+        cell_titulo.border = borde
+        fila_actual += 1
+        
+        # Encabezados
+        worksheet.cell(row=fila_actual, column=1).value = "Hora"
+        for idx, dia in enumerate(dias, start=2):
+            cell = worksheet.cell(row=fila_actual, column=idx)
+            cell.value = dia
+            cell.fill = color_header
+            cell.font = fuente_header
+            cell.alignment = alineacion_centro
+            cell.border = borde
+        
+        cell_hora_header = worksheet.cell(row=fila_actual, column=1)
+        cell_hora_header.fill = color_header
+        cell_hora_header.font = fuente_header
+        cell_hora_header.alignment = alineacion_centro
+        cell_hora_header.border = borde
+        fila_actual += 1
+        
+        asignaciones_monitor = df_asig[df_asig['MONITOR'] == monitor['nombre']]
+        
+        for hora in range(hora_min, hora_max):
+            hora_str = f"{hora}-{hora+1}"
+            
+            cell_hora = worksheet.cell(row=fila_actual, column=1)
+            cell_hora.value = hora_str
+            cell_hora.fill = color_header
+            cell_hora.font = fuente_header
+            cell_hora.alignment = alineacion_centro
+            cell_hora.border = borde
+            
+            for idx_dia, dia in enumerate(dias, start=2):
+                cell = worksheet.cell(row=fila_actual, column=idx_dia)
+                cell.border = borde
+                cell.alignment = alineacion_centro
+                
+                dia_norm = dia.lower()
+                asig_celda = asignaciones_monitor[
+                    (asignaciones_monitor['DIA_NORM'] == dia_norm) &
+                    (asignaciones_monitor[cfg_esp["col_hora_inicio"]] <= hora) &
+                    (asignaciones_monitor[cfg_esp["col_hora_fin"]] > hora)
+                ]
+                
+                if len(asig_celda) > 0:
+                    asig = asig_celda.iloc[0]
+                    curso = asig[cfg_esp["col_curso"]]
+                    sala = asig[cfg_esp["col_sala"]]
+                    
+                    cell.value = f"{sala}\n{curso}"
+                    cell.fill = color_clase
+                    cell.font = fuente_normal
+                else:
+                    cell.value = ""
+                    cell.fill = color_vacio
+            
+            fila_actual += 1
+        
+        fila_actual += 2
+    
+    worksheet.column_dimensions['A'].width = 10
+    for col in range(2, 8):
+        worksheet.column_dimensions[get_column_letter(col)].width = 22
+    
+    for row in range(1, fila_actual):
+        worksheet.row_dimensions[row].height = 35
+
+
+# ========================================================
+# MODELOS Y THREADS
+# ========================================================
+
 class PandasModel(QAbstractTableModel):
     def __init__(self, df=pd.DataFrame()):
         super().__init__()
@@ -371,7 +652,7 @@ class DownloadDialog(QDialog):
         stats_label.setAlignment(Qt.AlignCenter)
         stats_layout.addWidget(stats_label)
         layout.addWidget(stats_frame)
-        message = QLabel("¿Deseas descargar el archivo de resultados ahora?")
+        message = QLabel("¿Deseas descargar el archivo con horarios visuales ahora?")
         message.setFont(QFont("Inter", 13))
         message.setAlignment(Qt.AlignCenter)
         message.setStyleSheet("color: #6B7280;")
@@ -391,20 +672,37 @@ class DownloadDialog(QDialog):
         ruta, _ = QFileDialog.getSaveFileName(self, "Guardar archivo de resultados", "Asignacion_Monitores.xlsx", "Archivos Excel (*.xlsx)")
         if ruta:
             try:
+                cfg_esp = CONFIG["espacios"]
+                
+                # Preparar datos
                 df_mon = pd.DataFrame([{
                     'Monitor': m['nombre'], 'Prioridad': m['prioridad'], 'Horas': m['horas'],
                     'Min': m['min'], 'Max': m['max'], 'Horarios': len(m['asignaciones']),
                     'Estado': '✅' if m['min'] <= m['horas'] <= m['max'] else '⚠️'
                 } for m in self.monitores_asignados]).sort_values('Horas', ascending=False)
+                
+                salas = sorted(self.df_resultado[cfg_esp["col_sala"]].unique())
+                
+                # Crear archivo Excel con horarios visuales
                 with pd.ExcelWriter(ruta, engine='openpyxl') as writer:
-                    self.df_resultado.to_excel(writer, sheet_name='Asignaciones', index=False)
+                    # HOJA 1: Horarios visuales de todas las salas
+                    crear_horario_consolidado(writer, self.df_resultado, salas, cfg_esp)
+                    
+                    # HOJA 2: Horarios individuales por monitor
+                    crear_horario_monitores(writer, self.monitores_asignados, self.df_resultado, cfg_esp)
+                    
+                    # HOJA 3: Lista de asignaciones
+                    self.df_resultado.to_excel(writer, sheet_name='Lista Asignaciones', index=False)
+                    
+                    # HOJA 4: Resumen de monitores
                     df_mon.to_excel(writer, sheet_name='Resumen Monitores', index=False)
+                
                 self.archivo_guardado = ruta
                 success_msg = QMessageBox(self)
                 success_msg.setIcon(QMessageBox.Information)
                 success_msg.setWindowTitle("Descarga Exitosa")
                 success_msg.setText("✅ Archivo guardado exitosamente")
-                success_msg.setInformativeText(f"📁 {ruta}")
+                success_msg.setInformativeText(f"📁 {ruta}\n\n📄 4 hojas generadas:\n• Horarios Salas (visual)\n• Horarios Monitores (individual)\n• Lista Asignaciones\n• Resumen Monitores")
                 success_msg.exec()
                 self.accept()
             except Exception as e:
@@ -440,7 +738,7 @@ class MainWindow(QWidget):
         main_layout.setSpacing(20)
         main_layout.setContentsMargins(24, 24, 24, 24)
 
-        # STATS CARDS (sin header antes)
+        # STATS CARDS
         stats_layout = QHBoxLayout()
         stats_layout.setSpacing(16)
         self.card_monitores = self.create_stat_card("👥", "Monitores", "0", "#8B5CF6")
@@ -451,7 +749,7 @@ class MainWindow(QWidget):
         stats_layout.addWidget(self.card_asignados)
         main_layout.addLayout(stats_layout)
 
-        # ===== ROADMAP TIPO CAMINO =====
+        # ROADMAP
         roadmap_card = ModernCard()
         roadmap_layout = QVBoxLayout(roadmap_card)
         roadmap_layout.setContentsMargins(20, 16, 20, 16)
@@ -475,42 +773,34 @@ class MainWindow(QWidget):
         header_roadmap.addWidget(self.btn_config)
         roadmap_layout.addLayout(header_roadmap)
         
-        # Roadmap horizontal tipo camino
         steps_container = QHBoxLayout()
         steps_container.setSpacing(0)
         steps_container.setContentsMargins(0, 0, 0, 0)
         
-        # Paso 1
         self.step1_frame = self.create_path_step("1", "Cargar Monitores", "👥", "pending")
         self.step1_frame.mousePressEvent = lambda e: self.cargar_monitores()
         self.step1_frame.setCursor(Qt.PointingHandCursor)
         steps_container.addWidget(self.step1_frame)
         
-        # Conector 1
         self.connector1 = self.create_path_connector("pending")
         steps_container.addWidget(self.connector1)
         
-        # Paso 2
         self.step2_frame = self.create_path_step("2", "Cargar Espacios", "📅", "pending")
         self.step2_frame.mousePressEvent = lambda e: self.cargar_espacios()
         self.step2_frame.setCursor(Qt.PointingHandCursor)
         steps_container.addWidget(self.step2_frame)
         
-        # Conector 2
         self.connector2 = self.create_path_connector("pending")
         steps_container.addWidget(self.connector2)
         
-        # Paso 3
         self.step3_frame = self.create_path_step("3", "Asignar Monitores", "⚡", "pending")
         self.step3_frame.mousePressEvent = lambda e: self.iniciar_asignacion() if self.step1_frame.status == "success" and self.step2_frame.status == "success" else None
         self.step3_frame.setCursor(Qt.PointingHandCursor)
         steps_container.addWidget(self.step3_frame)
         
-        # Conector 3
         self.connector3 = self.create_path_connector("pending")
         steps_container.addWidget(self.connector3)
         
-        # Paso 4
         self.step4_frame = self.create_path_step("4", "Exportar Resultados", "💾", "pending")
         self.step4_frame.mousePressEvent = lambda e: self.exportar() if not self.df_resultado.empty else None
         self.step4_frame.setCursor(Qt.PointingHandCursor)
@@ -626,7 +916,6 @@ class MainWindow(QWidget):
         self.monitores_asignados = []
 
     def create_path_step(self, number, title, icon, status="pending"):
-        """Crea un paso del roadmap tipo rectángulo de camino HORIZONTAL"""
         frame = QFrame()
         frame.setMinimumHeight(90)
         frame.setMaximumHeight(90)
@@ -691,7 +980,6 @@ class MainWindow(QWidget):
         return frame
     
     def create_path_connector(self, status="pending"):
-        """Crea un conector tipo camino entre pasos"""
         connector = QFrame()
         connector.setFixedSize(40, 90)
         connector.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -713,7 +1001,6 @@ class MainWindow(QWidget):
         return connector
     
     def update_step_status(self, step_frame, status):
-        """Actualiza el estado visual de un paso"""
         if status == "pending":
             bg_gradient = "stop:0 #F9FAFB, stop:1 #F3F4F6"
             border_color = "#E5E7EB"
@@ -747,7 +1034,6 @@ class MainWindow(QWidget):
         self.update_connectors()
     
     def update_connectors(self):
-        """Actualiza el color de los conectores según el progreso"""
         if hasattr(self, 'step1_frame') and self.step1_frame.status == "success":
             self.connector1.setStyleSheet("QFrame {background: #10B981;}")
         else:
@@ -794,7 +1080,12 @@ class MainWindow(QWidget):
         return f'#{r:02x}{g:02x}{b:02x}'
 
     def cargar_monitores(self):
-        ruta, _ = QFileDialog.getOpenFileName(self, "Seleccionar archivo de monitores", "", "Archivos Excel (*.xlsx *.xls)")
+        ruta, _ = QFileDialog.getOpenFileName(
+            self, 
+            "Seleccionar archivo de monitores", 
+            "", 
+            "Hojas de Cálculo (*.xlsx *.xls *.ods);;Excel (*.xlsx *.xls);;LibreOffice (*.ods)"
+        )
         if ruta:
             try:
                 self.monitores = cargar_monitores_desde_excel(ruta)
@@ -811,7 +1102,13 @@ class MainWindow(QWidget):
                 QMessageBox.critical(self, "Error", f"Error al cargar monitores:\n{str(e)}")
 
     def cargar_espacios(self):
-        ruta, _ = QFileDialog.getOpenFileName(self, "Seleccionar archivo de espacios", "", "Archivos Excel (*.xlsx *.xls)")
+        # CAMBIAR LA LÍNEA DEL FILTRO DE ARCHIVOS
+        ruta, _ = QFileDialog.getOpenFileName(
+            self, 
+            "Seleccionar archivo de espacios", 
+            "", 
+            "Hojas de Cálculo (*.xlsx *.xls *.ods);;Excel (*.xlsx *.xls);;LibreOffice (*.ods)"
+        )
         if ruta:
             try:
                 self.df_espacios = cargar_espacios_desde_excel(ruta)
@@ -869,7 +1166,6 @@ class MainWindow(QWidget):
         self.text_reporte.setPlainText(reporte)
         exitosos = len([a for a in df_resultado.to_dict('records') if a.get("ESTADO") == "✅"])
         total = len(df_resultado)
-        porcentaje = f"{exitosos*100/total:.0f}%" if total > 0 else "0%"
         self.card_asignados.value_label.setText(f"{exitosos}/{total}")
         self.progress.setVisible(False)
         self.lbl_estado.setText(f"✅ Asignación completada exitosamente!")
@@ -896,11 +1192,30 @@ class MainWindow(QWidget):
         ruta, _ = QFileDialog.getSaveFileName(self, "Guardar archivo", "Asignacion_Monitores.xlsx", "Archivos Excel (*.xlsx)")
         if ruta:
             try:
-                df_mon = pd.DataFrame([{'Monitor': m['nombre'], 'Prioridad': m['prioridad'], 'Horas': m['horas'], 'Min': m['min'], 'Max': m['max'], 'Horarios': len(m['asignaciones']), 'Estado': '✅' if m['min'] <= m['horas'] <= m['max'] else '⚠️'} for m in self.monitores_asignados]).sort_values('Horas', ascending=False)
+                cfg_esp = CONFIG["espacios"]
+                
+                df_mon = pd.DataFrame([{
+                    'Monitor': m['nombre'], 'Prioridad': m['prioridad'], 'Horas': m['horas'],
+                    'Min': m['min'], 'Max': m['max'], 'Horarios': len(m['asignaciones']),
+                    'Estado': '✅' if m['min'] <= m['horas'] <= m['max'] else '⚠️'
+                } for m in self.monitores_asignados]).sort_values('Horas', ascending=False)
+                
+                salas = sorted(self.df_resultado[cfg_esp["col_sala"]].unique())
+                
                 with pd.ExcelWriter(ruta, engine='openpyxl') as writer:
-                    self.df_resultado.to_excel(writer, sheet_name='Asignaciones', index=False)
+                    # HOJA 1: Horarios visuales de todas las salas
+                    crear_horario_consolidado(writer, self.df_resultado, salas, cfg_esp)
+                    
+                    # HOJA 2: Horarios individuales por monitor
+                    crear_horario_monitores(writer, self.monitores_asignados, self.df_resultado, cfg_esp)
+                    
+                    # HOJA 3: Lista de asignaciones
+                    self.df_resultado.to_excel(writer, sheet_name='Lista Asignaciones', index=False)
+                    
+                    # HOJA 4: Resumen de monitores
                     df_mon.to_excel(writer, sheet_name='Resumen Monitores', index=False)
-                QMessageBox.information(self, "Exportado", f"✅ Archivo guardado exitosamente:\n{ruta}")
+                
+                QMessageBox.information(self, "Exportado", f"✅ Archivo guardado exitosamente:\n{ruta}\n\n📄 4 hojas generadas:\n• Horarios Salas (visual)\n• Horarios Monitores (individual)\n• Lista Asignaciones\n• Resumen Monitores")
                 self.lbl_estado.setText(f"✅ Exportado: {ruta}")
                 self.update_step_status(self.step4_frame, "success")
             except Exception as e:
