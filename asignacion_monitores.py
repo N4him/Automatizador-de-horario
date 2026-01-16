@@ -719,8 +719,7 @@ class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Sistema de Asignación de Monitores")
-        self.setMinimumSize(1400, 900)
-        self.setWindowFlags(Qt.Window | Qt.WindowMaximizeButtonHint | Qt.WindowCloseButtonHint | Qt.WindowMinimizeButtonHint)
+        self.showMaximized()
         self.setStyleSheet("""
             QWidget {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #F0F4F8, stop:1 #E5E9F0);
