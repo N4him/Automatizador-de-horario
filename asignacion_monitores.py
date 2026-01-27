@@ -409,8 +409,7 @@ def crear_horario_consolidado(writer, df_asig, salas, cfg_esp):
                         cell.fill = color_sin_monitor
                         cell.font = Font(size=7, color="FF0000", bold=True)
                     else:
-                        nombre_corto = monitor.split()[0] if monitor else ""
-                        cell.value = f"{curso}\n{nombre_corto}"
+                        cell.value = f"{curso}\n{monitor}"  # ← NOMBRE COMPLETO
                         cell.font = fuente_negra
                         
                         hash_val = hash(monitor) % 3
@@ -427,17 +426,18 @@ def crear_horario_consolidado(writer, df_asig, salas, cfg_esp):
             columna_actual += 7
     
     # Ajustar anchos
+    # Ajustar anchos
     for col_num in range(1, columna_actual):
         col_letter = get_column_letter(col_num)
         if (col_num - 1) % 7 == 0:
             worksheet.column_dimensions[col_letter].width = 11
         else:
-            worksheet.column_dimensions[col_letter].width = 18
+            worksheet.column_dimensions[col_letter].width = 25  # ← AUMENTADO
     
     worksheet.row_dimensions[1].height = 25
     worksheet.row_dimensions[2].height = 20
     for row in range(3, fila_hora + 1):
-        worksheet.row_dimensions[row].height = 35
+        worksheet.row_dimensions[row].height = 40  # ← AUMENTADO
 
 
 def crear_horario_monitores(writer, monitores, df_asig, cfg_esp):
@@ -547,10 +547,10 @@ def crear_horario_monitores(writer, monitores, df_asig, cfg_esp):
     
     worksheet.column_dimensions['A'].width = 10
     for col in range(2, 8):
-        worksheet.column_dimensions[get_column_letter(col)].width = 22
+        worksheet.column_dimensions[get_column_letter(col)].width = 25  # ← AUMENTADO
     
     for row in range(1, fila_actual):
-        worksheet.row_dimensions[row].height = 35
+        worksheet.row_dimensions[row].height = 40  # ← AUMENTADO
 
 
 # ========================================================
