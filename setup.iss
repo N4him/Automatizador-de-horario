@@ -1,11 +1,11 @@
 ; Script de Inno Setup para Sistema de Asignación de Monitores
-; Generado para aplicación Python con PySide6
+; Actualizado para la nueva estructura del proyecto
 
 #define MyAppName "Sistema de Asignación de Monitores"
 #define MyAppVersion "1.0"
 #define MyAppPublisher "Tu Nombre o Empresa"
 #define MyAppURL "https://tusitioweb.com"
-#define MyAppExeName "asignacion_monitores.exe"
+#define MyAppExeName "Asignacion_Monitores.exe"
 
 [Setup]
 ; IMPORTANTE: Genera un GUID único en https://www.guidgenerator.com/
@@ -23,7 +23,7 @@ DisableProgramGroupPage=yes
 ; Carpeta donde se guardará el instalador generado
 OutputDir=installer_output
 OutputBaseFilename=Setup_Sistema_Asignacion_Monitores_v{#MyAppVersion}
-; Icono del instalador
+; Icono del instalador (ajustado a la nueva ubicación)
 SetupIconFile=icon.ico
 Compression=lzma
 SolidCompression=yes
@@ -44,13 +44,14 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 ; Archivo ejecutable principal desde la carpeta dist
 Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-; Si PyInstaller generó otros archivos en dist, descomenta esta línea:
-; Source: "dist\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-; Icono de la aplicación
+; Todos los archivos de la carpeta dist (incluye dependencias de PyInstaller)
+Source: "dist\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Iconos (ajustados a la nueva estructura)
 Source: "icon.ico"; DestDir: "{app}"; Flags: ignoreversion
-; Archivos adicionales (opcional)
-; Source: "README.txt"; DestDir: "{app}"; Flags: ignoreversion isreadme
-; Source: "LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "icon.png"; DestDir: "{app}"; Flags: ignoreversion
+; Archivos adicionales opcionales
+; Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion isreadme
+; Source: ".gitignore"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 ; Acceso directo en el menú inicio
@@ -65,8 +66,11 @@ Name: "{autoprograms}\Desinstalar {#MyAppName}"; Filename: "{uninstallexe}"
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
-; Limpiar archivos generados por la aplicación (opcional)
+; Limpiar archivos generados por la aplicación
 Type: filesandordirs; Name: "{app}"
+; Limpiar caché de Python si existe
+Type: filesandordirs; Name: "{app}\__pycache__"
+Type: filesandordirs; Name: "{app}\_internal"
 
 [Code]
 // Función para verificar si la aplicación está en ejecución
