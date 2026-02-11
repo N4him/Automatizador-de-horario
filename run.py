@@ -11,5 +11,5 @@ sys.path.insert(0, src_path)
 
 # Ahora importar y ejecutar main
 if __name__ == "__main__":
-    from main import main
+    from src.main import main
     main()

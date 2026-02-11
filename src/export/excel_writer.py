@@ -37,6 +37,8 @@ def crear_horarios_por_sala(writer, df_resultado, cfg_esp):
     """
     Crea UNA SOLA hoja con todas las salas en HORIZONTAL (lado a lado)
     Al final, calcula la sumatoria total de todas las salas
+    Los subtotales por día INCLUYEN "SIN MONITOR"
+    Los totales por semana y general EXCLUYEN "SIN MONITOR"
     """
     # Obtener días de la semana
     dias_semana = ['Lunes', 'Martes', 'Miercoles', 'Jueves', 'Viernes', 'Sabado']
@@ -72,8 +74,13 @@ def crear_horarios_por_sala(writer, df_resultado, cfg_esp):
     
     todos_monitores = sorted(list(todos_monitores))
     
-    # Generar colores únicos para cada monitor
-    colores_monitores = generar_colores_monitores(todos_monitores)
+    # Generar colores únicos para cada monitor (excluyendo "SIN MONITOR")
+    monitores_reales = [m for m in todos_monitores if m not in ["SIN MONITOR", "DÍA INVÁLIDO"]]
+    colores_monitores = generar_colores_monitores(monitores_reales)
+    
+    # Asignar color gris para "SIN MONITOR" y "DÍA INVÁLIDO"
+    colores_monitores["SIN MONITOR"] = "D3D3D3"  # Gris claro
+    colores_monitores["DÍA INVÁLIDO"] = "FFB6C1"  # Rosa claro
     
     # Diccionario para almacenar matrices de cada sala
     matrices_salas = {}
@@ -110,10 +117,11 @@ def crear_horarios_por_sala(writer, df_resultado, cfg_esp):
         
         matrices_salas[sala] = matriz_horas
         
-        # Calcular total por sala
+        # Calcular total por sala (EXCLUYENDO "SIN MONITOR" y "DÍA INVÁLIDO")
         total_sala = sum([
             sum(matriz_horas[m].values()) 
             for m in todos_monitores
+            if m not in ["SIN MONITOR", "DÍA INVÁLIDO"]  # ← EXCLUIR del total
         ])
         totales_por_sala[sala] = total_sala
     
@@ -219,15 +227,20 @@ def crear_horarios_por_sala(writer, df_resultado, cfg_esp):
         
         # Agregar columna "Subtotal por monitor" al final de la fila
         cell_subtotal = worksheet.cell(fila_actual, columna_actual)
-        cell_subtotal.value = int(total_horas_monitor)
-        cell_subtotal.fill = PatternFill(start_color=color_monitor, end_color=color_monitor, fill_type="solid")
-        cell_subtotal.font = Font(bold=True, size=11)
+        if total_horas_monitor > 0:
+            cell_subtotal.value = int(total_horas_monitor)
+            cell_subtotal.fill = PatternFill(start_color=color_monitor, end_color=color_monitor, fill_type="solid")
+            cell_subtotal.font = Font(bold=True, size=11)
+        else:
+            cell_subtotal.value = ''
+            cell_subtotal.fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+        
         cell_subtotal.alignment = Alignment(horizontal='center', vertical='center')
         cell_subtotal.border = header_border
         
         fila_actual += 1
     
-    # FILA: Subtotal por día (para cada sala)
+    # FILA: Subtotal por día (para cada sala) - INCLUYENDO "SIN MONITOR"
     columna_actual = 1
     for sala in salas:
         matriz = matrices_salas.get(sala, {})
@@ -240,11 +253,11 @@ def crear_horarios_por_sala(writer, df_resultado, cfg_esp):
         cell_label.alignment = Alignment(horizontal='center', vertical='center')
         cell_label.border = header_border
         
-        # Subtotales por día
+        # Subtotales por día (INCLUYENDO todos los monitores)
         for idx_dia, dia in enumerate(dias_semana, start=1):
             subtotal_dia = sum([
                 matriz.get(m, {}).get(dia, 0)
-                for m in todos_monitores
+                for m in todos_monitores  # ← INCLUIR TODOS
             ])
             
             cell = worksheet.cell(fila_actual, columna_actual + idx_dia)
@@ -258,7 +271,7 @@ def crear_horarios_por_sala(writer, df_resultado, cfg_esp):
     
     fila_actual += 1
     
-    # FILA: Total por semana (para cada sala)
+    # FILA: Total por semana (para cada sala) - EXCLUYENDO "SIN MONITOR"
     columna_actual = 1
     for sala in salas:
         # Merge de "Total por semana"
@@ -275,7 +288,7 @@ def crear_horarios_por_sala(writer, df_resultado, cfg_esp):
         cell_label.alignment = Alignment(horizontal='center', vertical='center')
         cell_label.border = header_border
         
-        # Total de la sala
+        # Total de la sala (EXCLUYENDO "SIN MONITOR" - ya calculado arriba)
         cell_total = worksheet.cell(fila_actual, columna_actual + len(dias_semana))
         cell_total.value = int(totales_por_sala.get(sala, 0))
         cell_total.fill = PatternFill(start_color="92D050", end_color="92D050", fill_type="solid")
@@ -287,7 +300,7 @@ def crear_horarios_por_sala(writer, df_resultado, cfg_esp):
     
     fila_actual += 2  # Espacio
     
-    # === FILA FINAL: SUMATORIA TOTAL DE TODAS LAS SALAS ===
+    # === FILA FINAL: SUMATORIA TOTAL DE TODAS LAS SALAS (EXCLUYENDO "SIN MONITOR") ===
     total_general_todas_salas = sum(totales_por_sala.values())
     
     # Merge de toda la fila menos la última columna
@@ -304,7 +317,7 @@ def crear_horarios_por_sala(writer, df_resultado, cfg_esp):
     cell_label_total.alignment = Alignment(horizontal='center', vertical='center')
     cell_label_total.border = header_border
     
-    # Total general
+    # Total general (EXCLUYENDO "SIN MONITOR" - ya calculado arriba)
     cell_total_general = worksheet.cell(fila_actual, len(salas) * num_columnas_por_sala)
     cell_total_general.value = int(total_general_todas_salas)
     cell_total_general.fill = PatternFill(start_color="70AD47", end_color="70AD47", fill_type="solid")
@@ -315,7 +328,7 @@ def crear_horarios_por_sala(writer, df_resultado, cfg_esp):
     worksheet.row_dimensions[fila_actual].height = 30
     
     # === AJUSTAR ANCHOS DE COLUMNA ===
-    for col_num in range(1, (len(salas) * num_columnas_por_sala) + 2):  # +2 para incluir la columna de subtotal
+    for col_num in range(1, (len(salas) * num_columnas_por_sala) + 2):
         col_letter = get_column_letter(col_num)
         
         # Cada primera columna de cada sala (columna de monitores)
